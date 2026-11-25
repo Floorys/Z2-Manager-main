@@ -1,0 +1,113 @@
+#!/bin/sh
+# shellcheck disable=SC3043
+# ==============================================================================
+# Zapret2-Manager: Terminal UI & Formatting Helpers
+# ==============================================================================
+
+[ -z "${Z2M_DIR:-}" ] && Z2M_DIR="$(cd "$(dirname "$0")/.." >/dev/null 2>&1 && pwd)"
+[ -f "${Z2M_DIR}/core/config.sh" ] && . "${Z2M_DIR}/core/config.sh"
+
+tui_banner() {
+    clear 2>/dev/null || printf "\033[2J\033[H"
+    printf "%b" "${CYAN}"
+    cat << "EOF"
+  ______                      _   ___     __  __
+ |___  /                     | | |__ \   |  \/  |
+    / / __ _ _ __  _ __  ___ | |_   ) |  | \  / |
+   / / / _` | '_ \| '__|/ _ \| __| / /   | |\/| |
+  / /_| (_| | |_) | |  |  __/| |_ / /_   | |  | |
+ /_____\__,_| .__/|_|   \___| \__|____|  |_|  |_|
+            |_|
+EOF
+    printf "%b" "${NC}"
+    printf "%b  Zapret2 Manager v%s | Asterlike & 1andrevich Architecture%b\n" "${DGRAY}" "${Z2M_VERSION}" "${NC}"
+    printf "%b  -------------------------------------------------------------------%b\n\n" "${DGRAY}" "${NC}"
+}
+
+tui_header() {
+    local title="$1"
+    printf "%b%b%s%b\n" "${BOLD}" "${WHITE}" "${title}" "${NC}"
+    printf "%b%s%b\n\n" "${DGRAY}" "-------------------------------------------------------------------" "${NC}"
+}
+
+tui_info() {
+    printf "%b[*] %s%b\n" "${CYAN}" "$1" "${NC}"
+}
+
+tui_success() {
+    printf "%b[+] %s%b\n" "${GREEN}" "$1" "${NC}"
+}
+
+tui_warn() {
+    printf "%b[!] %s%b\n" "${YELLOW}" "$1" "${NC}"
+}
+
+tui_error() {
+    printf "%b[-] %s%b\n" "${RED}" "$1" "${NC}" >&2
+}
+
+tui_step() {
+    local current="$1"
+    local total="$2"
+    local msg="$3"
+    printf "%b[%s/%s]%b %s\n" "${MAGENTA}" "${current}" "${total}" "${NC}" "${msg}"
+}
+
+tui_pause() {
+    [ "${Z2M_NONINTERACTIVE:-0}" = "1" ] && return 0
+    printf "\n%bНажмите [Enter] для продолжения...%b " "${DGRAY}" "${NC}" >&2
+    # shellcheck disable=SC2034
+    read -r dummy </dev/tty 2>/dev/null || read -r dummy
+}
+
+tui_prompt() {
+    local prompt_text="$1"
+    local default_val="$2"
+    local user_val=""
+
+    if [ "${Z2M_NONINTERACTIVE:-0}" = "1" ]; then
+        echo "${default_val}"
+        return 0
+    fi
+
+    if [ -n "${default_val}" ]; then
+        printf "%b %b[%s]%b: " "${prompt_text}" "${DGRAY}" "${default_val}" "${NC}" >&2
+    else
+        printf "%b: " "${prompt_text}" >&2
+    fi
+
+    read -r user_val </dev/tty 2>/dev/null || read -r user_val
+    user_val=$(echo "${user_val}" | tr -d '\r\n')
+
+    if [ -z "${user_val}" ]; then
+        echo "${default_val}"
+    else
+        echo "${user_val}"
+    fi
+}
+
+tui_print_result_table_header() {
+    printf "%b%-42s %-10s %-10s %-10s%b\n" "${BOLD}" "Стратегия / Бандл" "Успешно" "Ошибок" "Статус" "${NC}"
+    printf "%b-------------------------------------------------------------------%b\n" "${DGRAY}" "${NC}"
+}
+
+tui_print_result_row() {
+    local name="$1"
+    local ok="$2"
+    local fail="$3"
+    local total="$4"
+    local glyph="[~]"
+    local color="${YELLOW}"
+
+    if [ "${fail}" -eq 0 ] && [ "${ok}" -gt 0 ]; then
+        glyph="[+]"
+        color="${GREEN}"
+    elif [ "${ok}" -eq 0 ]; then
+        glyph="[-]"
+        color="${RED}"
+    fi
+
+    # Do not cut multibyte UTF-8 characters with byte-based printf formatters
+    printf "%-42s %b%-10s%b %b%-10s%b %b%s %s/%s%b\n" \
+        "${name}" "${GREEN}" "${ok}" "${NC}" "${RED}" "${fail}" "${NC}" "${color}" "${glyph}" "${ok}" "${total}" "${NC}"
+}

@@ -1,0 +1,30 @@
+MIT License
+
+Copyright (c) 2026 Zapret2-Manager Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Attribution & Third-Party Credits:
+- zapret2 (nfqws2) by bol-van (https://github.com/bol-van/zapret2) - MIT License.
+  The engine binaries are part of zapret2-openwrt and are not bundled or modified in this repository.
+- zapret2-openwrt package by 1andrevich (https://github.com/1andrevich/zapret2-openwrt) - MIT License.
+- Strategy generator & selection principles adapted from zapret2UI by Asterlike (https://github.com/Asterlike/zapret2UI) - MIT License.
+- Modular shell manager architecture inspired by Zapret-Manager by StressOzz (https://github.com/StressOzz/Zapret-Manager).

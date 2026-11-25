@@ -1,0 +1,370 @@
+#!/bin/sh
+# ==============================================================================
+# Zapret2-Manager: DNS & DoH Management Module
+# DNS leak prevention and DNS-over-HTTPS configuration for OpenWrt
+# ==============================================================================
+
+[ -z "${Z2M_DIR:-}" ] && Z2M_DIR="$(cd "$(dirname "$0")/.." >/dev/null 2>&1 && pwd)"
+[ -f "${Z2M_DIR}/core/config.sh" ] && . "${Z2M_DIR}/core/config.sh"
+[ -f "${Z2M_DIR}/core/tui.sh" ] && . "${Z2M_DIR}/core/tui.sh"
+[ -f "${Z2M_DIR}/core/probe.sh" ] && . "${Z2M_DIR}/core/probe.sh"
+
+get_current_dns() {
+    local dns_list=""
+    if [ -f /tmp/resolv.conf.auto ]; then
+        dns_list=$(grep "^nameserver" /tmp/resolv.conf.auto 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+    fi
+    if [ -z "${dns_list}" ] && [ -f /etc/resolv.conf ]; then
+        dns_list=$(grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+    fi
+    echo "${dns_list:-127.0.0.1}"
+}
+
+is_doh_running() {
+    if pidof https-dns-proxy >/dev/null 2>&1 || pgrep https-dns-proxy >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+run_dns_menu() {
+    while true; do
+        tui_banner
+        tui_header "Меню настройки DNS и DNS-over-HTTPS (DoH)"
+
+        local cur_dns
+        cur_dns=$(get_current_dns)
+        printf "  %bТекущие DNS:%b %b%s%b\n" "${BOLD}" "${NC}" "${CYAN}" "${cur_dns}" "${NC}"
+
+        local doh_status="${RED}Не активен${NC}"
+        if is_doh_running; then
+            doh_status="${GREEN}Работает (https-dns-proxy)${NC}"
+        fi
+        printf "  %bСтатус DoH :%b %b\n" "${BOLD}" "${NC}" "${doh_status}"
+        printf "%b  -------------------------------------------------------------------%b\n\n" "${DGRAY}" "${NC}"
+
+        printf "  1. Проверить DNS на подмену (DNS Poisoning / заглушка РКН)\n"
+        printf "  2. Настроить DNS-over-HTTPS (DoH: Google, Quad9, Xbox, DNS.ru...)\n"
+        printf "  3. Установить безопасные DNS в dnsmasq (без шифрования)\n"
+        printf "  4. Отключить DoH и сбросить DNS на стандартные провайдера\n"
+        printf "  0. Назад в главное меню\n\n"
+
+        local choice
+        choice=$(tui_prompt "Выберите действие" "0")
+
+        case "${choice}" in
+            1)
+                _check_dns_poisoning
+                ;;
+            2)
+                _setup_doh
+                ;;
+            3)
+                _set_secure_dnsmasq
+                ;;
+            4)
+                _disable_doh
+                ;;
+            0)
+                break
+                ;;
+            *)
+                tui_warn "Неверный выбор"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+_check_dns_poisoning() {
+    tui_banner
+    tui_header "Проверка DNS на вмешательство провайдера"
+    tui_info "Тестируем резолв заблокированных доменов через текущий DNS..."
+
+    local test_domain="rutracker.org"
+    local ip
+    ip=$(probe_dns_resolve "${test_domain}")
+
+    echo ""
+    if [ -n "${ip}" ]; then
+        printf "  Домен %s разрешен в IP: %b%s%b\n" "${test_domain}" "${CYAN}" "${ip}" "${NC}"
+        if probe_is_spoofed_ip "${ip}"; then
+            tui_error "ВНИМАНИЕ: Обнаружена подмена DNS провайдером (DNS Spoofing / Локальная заглушка)!"
+            tui_warn "Рекомендуется включить DNS-over-HTTPS (DoH) для обхода перехвата DNS."
+        else
+            tui_success "DNS-ответ выглядит реальным. Прямая подмена не зафиксирована."
+        fi
+    else
+        tui_warn "Не удалось разрешить домен ${test_domain}."
+    fi
+    tui_pause
+}
+
+# Replace plain upstream DNS servers while preserving domain-scoped (/domain/ip) split-DNS entries.
+dns_set_dnsmasq_servers() {
+    local keep_split="$1"
+    shift
+    local existing="" entry="" kept=""
+    if [ "${keep_split}" = "1" ]; then
+        existing=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null || :)
+        for entry in ${existing}; do
+            case "${entry}" in
+                /*) kept="${kept} ${entry}" ;;
+            esac
+        done
+    fi
+    uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null || :
+    for entry in ${kept}; do
+        uci add_list "dhcp.@dnsmasq[0].server=${entry}" || return 1
+    done
+    for entry in "$@"; do
+        [ -n "${entry}" ] || continue
+        uci add_list "dhcp.@dnsmasq[0].server=${entry}" || return 1
+    done
+}
+
+# Update the primary resolver in place; otherwise use the exact new section ID.
+dns_configure_doh_section() {
+    local bootstrap="$1" url="$2" section
+    if uci -q get 'https-dns-proxy.@https-dns-proxy[0]' >/dev/null 2>&1; then
+        section='https-dns-proxy.@https-dns-proxy[0]'
+    else
+        section=$(uci add https-dns-proxy https-dns-proxy) || return 1
+        [ -n "${section}" ] || return 1
+        section="https-dns-proxy.${section}"
+    fi
+    DNS_DOH_SECTION="${section}"
+    uci set "${section}.bootstrap_dns=${bootstrap}" &&
+        uci set "${section}.resolver_url=${url}" &&
+        uci set "${section}.url_prefix=${url}" &&
+        uci set "${section}.listen_addr=127.0.0.1" &&
+        uci set "${section}.listen_port=5053"
+}
+
+_setup_doh() {
+    tui_banner
+    tui_header "Выбор провайдера DNS-over-HTTPS (DoH)"
+    printf "  %b1.%b Google DNS      %b(https://dns.google/dns-query | 8.8.8.8)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b2.%b Quad9 DNS       %b(https://dns.quad9.net/dns-query | 9.9.9.9, без цензуры)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b3.%b Xbox / Comss    %b(https://dns.comss.one/dns-query | обход блокировок консолей)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b4.%b DNS.ru / Yandex %b(https://common.dot.dns.yandex.net/dns-query | быстрый RU)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b5.%b Cloudflare DNS  %b(https://cloudflare-dns.com/dns-query | 1.1.1.1)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b6.%b AdGuard DNS     %b(https://dns.adguard.com/dns-query | блокировка рекламы)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b7.%b Пользовательский DoH URL\n" "${BOLD}" "${NC}"
+    printf "  %b0.%b Отмена\n\n" "${BOLD}" "${NC}"
+
+    local p_choice
+    p_choice=$(tui_prompt "Выберите провайдера" "1")
+    local doh_url=""
+    local doh_name=""
+    local bootstrap_ips=""
+
+    case "${p_choice}" in
+        1)
+            doh_url="https://dns.google/dns-query"
+            doh_name="Google DNS"
+            bootstrap_ips="8.8.8.8,8.8.4.4"
+            ;;
+        2)
+            doh_url="https://dns.quad9.net/dns-query"
+            doh_name="Quad9 DNS"
+            bootstrap_ips="9.9.9.9,149.112.112.112"
+            ;;
+        3)
+            doh_url="https://dns.comss.one/dns-query"
+            doh_name="Xbox DNS (Comss.one)"
+            bootstrap_ips="95.216.208.204,188.138.8.199"
+            ;;
+        4)
+            doh_url="https://common.dot.dns.yandex.net/dns-query"
+            doh_name="DNS.ru / Yandex DNS"
+            bootstrap_ips="77.88.8.8,77.88.8.1"
+            ;;
+        5)
+            doh_url="https://cloudflare-dns.com/dns-query"
+            doh_name="Cloudflare DNS"
+            bootstrap_ips="1.1.1.1,1.0.0.1"
+            ;;
+        6)
+            doh_url="https://dns.adguard.com/dns-query"
+            doh_name="AdGuard DNS"
+            bootstrap_ips="94.140.14.14,94.140.15.15"
+            ;;
+        7)
+            doh_url=$(tui_prompt "Введите полный DoH URL" "https://dns.google/dns-query")
+            doh_name="Custom DoH"
+            bootstrap_ips="8.8.8.8,1.1.1.1"
+            ;;
+        0)
+            return
+            ;;
+        *)
+            tui_warn "Неверный выбор"
+            sleep 1
+            return
+            ;;
+    esac
+
+    case "${doh_url}" in
+        *[[:space:]]*|http://*|'' )
+            tui_error "DoH URL должен начинаться с https:// и не содержать пробелов."
+            tui_pause
+            return 1
+            ;;
+        https://*) ;;
+        *)
+            tui_error "DoH URL должен начинаться с https:// и не содержать пробелов."
+            tui_pause
+            return 1
+            ;;
+    esac
+
+    if ! command -v uci >/dev/null 2>&1; then
+        tui_error "UCI не найден; настройка DNS отменена."
+        tui_pause
+        return 1
+    fi
+
+    tui_info "Проверка пакета https-dns-proxy..."
+    if ! command -v https-dns-proxy >/dev/null 2>&1; then
+        tui_info "Устанавливаем https-dns-proxy..."
+        if command -v apk >/dev/null 2>&1; then
+            apk add https-dns-proxy >/dev/null 2>&1
+        elif command -v opkg >/dev/null 2>&1; then
+            opkg update >/dev/null 2>&1
+            opkg install https-dns-proxy >/dev/null 2>&1
+        fi
+    fi
+
+    if command -v https-dns-proxy >/dev/null 2>&1; then
+        z2m_prepare_runtime || return 1
+        local doh_was_running=0 doh_was_enabled=0
+        is_doh_running && doh_was_running=1
+        [ -x /etc/init.d/https-dns-proxy ] && /etc/init.d/https-dns-proxy enabled >/dev/null 2>&1 && doh_was_enabled=1
+        local dhcp_backup doh_backup
+        dhcp_backup=$(mktemp "${Z2M_TMP}/dhcp_backup.XXXXXX") || return 1
+        doh_backup=$(mktemp "${Z2M_TMP}/doh_backup.XXXXXX") || {
+            rm -f "${dhcp_backup}"; return 1;
+        }
+        if ! uci export dhcp > "${dhcp_backup}" 2>/dev/null; then
+            tui_error "Не удалось сохранить текущую конфигурацию DNS."
+            rm -f "${dhcp_backup}" "${doh_backup}"
+            tui_pause
+            return 1
+        fi
+        uci export https-dns-proxy > "${doh_backup}" 2>/dev/null || : > "${doh_backup}"
+
+        # Конфигурация https-dns-proxy
+        local dns_config_ok=1
+        dns_configure_doh_section "${bootstrap_ips}" "${doh_url}" || dns_config_ok=0
+        uci commit https-dns-proxy 2>/dev/null || dns_config_ok=0
+
+        /etc/init.d/https-dns-proxy enable >/dev/null 2>&1
+        /etc/init.d/https-dns-proxy restart >/dev/null 2>&1
+
+        # Направляем dnsmasq на локальный DoH прокси (127.0.0.1#5053), сохраняя split-DNS правила
+        dns_set_dnsmasq_servers 1 "127.0.0.1#5053" || dns_config_ok=0
+        uci set dhcp.@dnsmasq[0].noresolv="1" || dns_config_ok=0
+        uci commit dhcp || dns_config_ok=0
+        /etc/init.d/dnsmasq restart >/dev/null 2>&1
+
+        sleep 2
+        local doh_ok=0
+        if [ "${dns_config_ok}" -eq 1 ] && is_doh_running; then
+            if command -v nslookup >/dev/null 2>&1; then
+                nslookup openwrt.org 127.0.0.1 >/dev/null 2>&1 && doh_ok=1
+            else
+                doh_ok=1
+            fi
+        fi
+
+        if [ "${doh_ok}" -ne 1 ]; then
+            tui_error "DoH-прокси не прошёл проверку. Восстанавливаем предыдущую DNS-конфигурацию."
+            /etc/init.d/https-dns-proxy stop >/dev/null 2>&1
+            uci import dhcp < "${dhcp_backup}" 2>/dev/null
+            uci commit dhcp 2>/dev/null
+            if [ -s "${doh_backup}" ]; then
+                uci import https-dns-proxy < "${doh_backup}" 2>/dev/null
+                uci commit https-dns-proxy 2>/dev/null
+            else
+                [ -z "${DNS_DOH_SECTION:-}" ] || uci -q delete "${DNS_DOH_SECTION}" 2>/dev/null
+                uci commit https-dns-proxy 2>/dev/null
+            fi
+            if [ "${doh_was_enabled}" -ne 1 ] && [ -x /etc/init.d/https-dns-proxy ]; then
+                /etc/init.d/https-dns-proxy disable >/dev/null 2>&1
+            fi
+            if [ "${doh_was_running}" -eq 1 ]; then
+                /etc/init.d/https-dns-proxy restart >/dev/null 2>&1
+            else
+                /etc/init.d/https-dns-proxy stop >/dev/null 2>&1
+            fi
+            /etc/init.d/dnsmasq restart >/dev/null 2>&1
+            rm -f "${dhcp_backup}" "${doh_backup}"
+            tui_pause
+            return 1
+        fi
+        rm -f "${dhcp_backup}" "${doh_backup}"
+        tui_success "DoH (${doh_name}) успешно настроен и проверен через 127.0.0.1:5053!"
+    else
+        tui_warn "Пакет https-dns-proxy недоступен в репозиториях вашего роутера."
+        tui_info "Настраиваем безопасные DNS напрямую в dnsmasq..."
+        local ip1 ip2
+        ip1=$(echo "${bootstrap_ips}" | cut -d',' -f1)
+        ip2=$(echo "${bootstrap_ips}" | cut -d',' -f2)
+        dns_set_dnsmasq_servers 1 "${ip1}" "${ip2}"
+        uci set dhcp.@dnsmasq[0].noresolv="1"
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart >/dev/null 2>&1
+        tui_success "DNS (${doh_name}) успешно настроен в dnsmasq!"
+    fi
+    tui_pause
+}
+
+_set_secure_dnsmasq() {
+    tui_banner
+    tui_header "Выбор безопасных DNS для dnsmasq"
+    printf "  %b1.%b Google DNS      %b(8.8.8.8, 8.8.4.4)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b2.%b Quad9 DNS       %b(9.9.9.9, 149.112.112.112)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b3.%b Xbox / Comss    %b(95.216.208.204, 188.138.8.199)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b4.%b DNS.ru / Yandex %b(77.88.8.8, 77.88.8.1)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b5.%b Cloudflare DNS  %b(1.1.1.1, 1.0.0.1)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b6.%b AdGuard DNS     %b(94.140.14.14, 94.140.15.15)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b0.%b Отмена\n\n" "${BOLD}" "${NC}"
+
+    local s_choice
+    s_choice=$(tui_prompt "Выберите DNS" "1")
+    local d1="8.8.8.8" d2="8.8.4.4" d_name="Google DNS"
+
+    case "${s_choice}" in
+        1) d1="8.8.8.8"; d2="8.8.4.4"; d_name="Google DNS" ;;
+        2) d1="9.9.9.9"; d2="149.112.112.112"; d_name="Quad9 DNS" ;;
+        3) d1="95.216.208.204"; d2="188.138.8.199"; d_name="Xbox DNS (Comss)" ;;
+        4) d1="77.88.8.8"; d2="77.88.8.1"; d_name="DNS.ru / Yandex DNS" ;;
+        5) d1="1.1.1.1"; d2="1.0.0.1"; d_name="Cloudflare DNS" ;;
+        6) d1="94.140.14.14"; d2="94.140.15.15"; d_name="AdGuard DNS" ;;
+        0) return ;;
+        *) tui_warn "Неверный выбор"; sleep 1; return ;;
+    esac
+
+    tui_info "Настройка ${d_name} (${d1}, ${d2}) в dnsmasq..."
+    dns_set_dnsmasq_servers 1 "${d1}" "${d2}"
+    uci set dhcp.@dnsmasq[0].noresolv="1"
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    tui_success "${d_name} успешно установлен в dnsmasq!"
+    tui_pause
+}
+
+_disable_doh() {
+    tui_info "Отключение DoH и сброс DNS на стандартные провайдера (DHCP)..."
+    if [ -f /etc/init.d/https-dns-proxy ]; then
+        /etc/init.d/https-dns-proxy stop >/dev/null 2>&1
+        /etc/init.d/https-dns-proxy disable >/dev/null 2>&1
+    fi
+    dns_set_dnsmasq_servers 1
+    uci set dhcp.@dnsmasq[0].noresolv="0"
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    tui_success "DNS успешно сброшен на параметры провайдера."
+    tui_pause
+}

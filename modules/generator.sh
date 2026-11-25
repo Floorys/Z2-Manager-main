@@ -1,0 +1,468 @@
+#!/bin/sh
+# shellcheck disable=SC3043
+# ==============================================================================
+# Zapret2-Manager: Strategy Generator Module
+# Two-Pass Tailored Strategy Generation (Discord vs YouTube)
+#
+# Based on Asterlike/zapret2UI (https://github.com/Asterlike/zapret2UI)
+# Licensed under the MIT License:
+# Copyright (c) 2026 Zapret UI contributors
+# ==============================================================================
+
+[ -z "${Z2M_DIR:-}" ] && Z2M_DIR="$(cd "$(dirname "$0")/.." >/dev/null 2>&1 && pwd)"
+[ -f "${Z2M_DIR}/core/config.sh" ] && . "${Z2M_DIR}/core/config.sh"
+[ -f "${Z2M_DIR}/core/tui.sh" ] && . "${Z2M_DIR}/core/tui.sh"
+[ -f "${Z2M_DIR}/core/probe.sh" ] && . "${Z2M_DIR}/core/probe.sh"
+[ -f "${Z2M_DIR}/core/combo_builder.sh" ] && . "${Z2M_DIR}/core/combo_builder.sh"
+[ -f "${Z2M_DIR}/core/zapret_service.sh" ] && . "${Z2M_DIR}/core/zapret_service.sh"
+[ -f "${Z2M_DIR}/strategies/candidates.sh" ] && . "${Z2M_DIR}/strategies/candidates.sh"
+
+run_strategy_generator() {
+    z2m_run_guarded strategy_generator_worker
+}
+
+strategy_generator_worker() {
+    tui_banner
+    tui_header "Генератор персональной стратегии (Asterlike Two-Pass Generator)"
+
+    tui_info "Этот режим подбирает уникальную связку десинка:"
+    tui_info "1. Замер baseline: проверка текущей стратегии тем же набором проб."
+    tui_info "2. Pass 1: перебор кандидатов раздельно для Discord и YouTube (с повторами)."
+    tui_info "3. Pass 2: совместное тестирование лучших пар с учетом Gateway Discord."
+    echo ""
+
+    tui_info "Тестирование доступности выполняется напрямую с роутера (протоколы TCP/TLS)."
+    if [ -n "${CURL_INTERFACE:-}" ]; then
+        tui_info "Используется сетевой интерфейс: ${CURL_INTERFACE}"
+    fi
+    echo ""
+
+    if ! zapret_is_installed; then
+        tui_error "Пакет zapret2 не установлен в системе!"
+        tui_pause
+        return 1
+    fi
+    if ! probe_check_deps; then
+        tui_error "Не найдены curl или wget — проверка доступа в интернет невозможна!"
+        tui_pause
+        return 1
+    fi
+
+    # Synchronize required blobs and lists
+    zapret_sync_fake_blobs || { tui_error "Не удалось синхронизировать файлы фейков!"; tui_pause; return 1; }
+    zapret_sync_hostlists 0 || { tui_error "Не удалось синхронизировать списки хостов!"; tui_pause; return 1; }
+
+    # The shared guard owns the snapshot and terminates the worker on signals.
+
+    tui_info "Исходная конфигурация сохранена."
+
+    # Baseline measurement of the current strategy using the exact same probe suite
+    tui_info "Замер текущей конфигурации (baseline) перед поиском..."
+    local base_d_score=0 base_y_score=0
+    local base_min=0 base_sum=0
+    local b_d_max=0 b_y_max=0
+
+    # A stopped service may already have direct connectivity; measure it too.
+    # Both host lists are probed concurrently (probe_lists2).
+    local b1 b2
+    b1=$(probe_lists2 "${DISCORD_PROBE_HOSTS}" "${YOUTUBE_PROBE_HOSTS}")
+    sleep "${Z2M_PROBE_REPEAT_DELAY:-1}"
+    b2=$(probe_lists2 "${DISCORD_PROBE_HOSTS}" "${YOUTUBE_PROBE_HOSTS}")
+
+    local b_cd1 b_cd2 b_cy1 b_cy2
+    b_cd1=$(echo "${b1}" | sed -n 1p)
+    b_cy1=$(echo "${b1}" | sed -n 2p)
+    b_cd2=$(echo "${b2}" | sed -n 1p)
+    b_cy2=$(echo "${b2}" | sed -n 2p)
+
+    local b_cd_s1 b_cd_s2 b_cy_s1 b_cy_s2
+    local b_cd_m1 b_cd_m2 b_cy_m1 b_cy_m2
+    b_cd_s1=$(echo "${b_cd1}" | awk '{print $3 + 0}')
+    b_cd_s2=$(echo "${b_cd2}" | awk '{print $3 + 0}')
+    b_cy_s1=$(echo "${b_cy1}" | awk '{print $3 + 0}')
+    b_cy_s2=$(echo "${b_cy2}" | awk '{print $3 + 0}')
+
+    b_cd_m1=$(echo "${b_cd1}" | awk '{print $4 + 0}')
+    b_cd_m2=$(echo "${b_cd2}" | awk '{print $4 + 0}')
+    b_cy_m1=$(echo "${b_cy1}" | awk '{print $4 + 0}')
+    b_cy_m2=$(echo "${b_cy2}" | awk '{print $4 + 0}')
+
+    base_d_score=$(( b_cd_s1 + b_cd_s2 ))
+    base_y_score=$(( b_cy_s1 + b_cy_s2 ))
+    b_d_max=$(( b_cd_m1 + b_cd_m2 ))
+    b_y_max=$(( b_cy_m1 + b_cy_m2 ))
+
+    if [ "${base_d_score}" -le "${base_y_score}" ]; then
+        base_min="${base_d_score}"
+    else
+        base_min="${base_y_score}"
+    fi
+    base_sum=$(( base_d_score + base_y_score ))
+    tui_info "Baseline: Discord: ${base_d_score}/${b_d_max}, YouTube: ${base_y_score}/${b_y_max} (Min: ${base_min}, Sum: ${base_sum})"
+    echo ""
+
+    tui_info "Запуск Pass 1: тестирование ${CANDIDATES_COUNT} десинк-бандлов (по 2 повтора)..."
+    tui_info "Все проверки хостов выполняются параллельно (curl на каждый домен)."
+    echo ""
+
+    local t_start
+    t_start=$(date +%s)
+
+    printf "%b%-4s %-32s %-12s %-12s %-8s%b\n" "${BOLD}" "№" "Кандидат" "Discord" "YouTube" "GW-Safe" "${NC}"
+    printf "%b-------------------------------------------------------------------%b\n" "${DGRAY}" "${NC}"
+
+    local cand_scores_d=""
+    local cand_scores_y=""
+    local perfect_cand=0
+    local d_max=0 y_max=0 _h
+    for _h in ${DISCORD_PROBE_HOSTS}; do d_max=$(( d_max + 2 )); done
+    for _h in ${YOUTUBE_PROBE_HOSTS}; do y_max=$(( y_max + 2 )); done
+
+    # ---- PASS 1: Screening of each bundle for Discord & YouTube (2 repeats) ----
+    local i=1
+    while [ "${i}" -le "${CANDIDATES_COUNT}" ]; do
+        local c_name c_tls
+        c_name=$(get_candidate_name "${i}")
+        c_tls=$(get_candidate_tls "${i}")
+
+        local gw_safe="Нет"
+        if is_gateway_friendly "${c_tls}"; then
+            gw_safe="${GREEN}Да${NC}"
+        fi
+
+        printf "\r\033[K%-4s %-32s %b[..] Тест... [%s/%s, %ss]%b" \
+            "${i}" "${c_name}" "${YELLOW}" "${i}" "${CANDIDATES_COUNT}" "$(( $(date +%s) - t_start ))" "${NC}"
+
+        # Apply candidate as standalone test rule
+        local test_opt
+        test_opt=$(combo_build_single_test_args "${c_tls}")
+        if ! zapret_set_opt "${test_opt}"; then
+            printf "\r\033[K%-4s %-32s %b%-12s%b %b%-12s%b %b\n" \
+                "${i}" "${c_name}" "${RED}" "Сбой" "${NC}" "${RED}" "Сбой" "${NC}" "${gw_safe}"
+            cand_scores_d="${cand_scores_d} ${i}:0"
+            cand_scores_y="${cand_scores_y} ${i}:0"
+            i=$(( i + 1 ))
+            continue
+        fi
+
+        # If daemon crashed or failed to start, score 0 and move on immediately
+        if ! zapret_is_running; then
+            printf "\r\033[K%-4s %-32s %b%-12s%b %b%-12s%b %b\n" \
+                "${i}" "${c_name}" "${RED}" "Сбой" "${NC}" "${RED}" "Сбой" "${NC}" "${gw_safe}"
+            cand_scores_d="${cand_scores_d} ${i}:0"
+            cand_scores_y="${cand_scores_y} ${i}:0"
+            i=$(( i + 1 ))
+            continue
+        fi
+
+        # Minimum 2 repeats per strategy to eliminate transient flukes.
+        # Host checks run concurrently (probe_counts2) for high speed.
+        local d_score_rep1=0 d_score_rep2=0
+        local y_score_rep1=0 y_score_rep2=0
+        local reps res
+        for reps in 1 2; do
+            if [ "${reps}" = "2" ]; then
+                # If neither service responded at all on repeat 1, skip repeat 2
+                if [ "${d_score_rep1}" -eq 0 ] && [ "${y_score_rep1}" -eq 0 ]; then
+                    break
+                fi
+                # Short pause between repeats
+                sleep "${Z2M_PROBE_REPEAT_DELAY:-1}"
+            fi
+            res=$(probe_counts2 "${DISCORD_PROBE_HOSTS}" "${YOUTUBE_PROBE_HOSTS}")
+            if [ "${reps}" = "1" ]; then
+                d_score_rep1=$(echo "${res}" | sed -n 1p | awk '{print $1 + 0}')
+                y_score_rep1=$(echo "${res}" | sed -n 2p | awk '{print $1 + 0}')
+            else
+                d_score_rep2=$(echo "${res}" | sed -n 1p | awk '{print $1 + 0}')
+                y_score_rep2=$(echo "${res}" | sed -n 2p | awk '{print $1 + 0}')
+            fi
+        done
+
+        # Store sum of two repeats instead of integer average
+        local d_score=$(( d_score_rep1 + d_score_rep2 ))
+        local y_score=$(( y_score_rep1 + y_score_rep2 ))
+
+        local d_col="${RED}"
+        [ "${d_score}" -gt 0 ] && d_col="${YELLOW}"
+        [ "${d_max}" -gt 0 ] && [ "${d_score}" -eq "${d_max}" ] && d_col="${GREEN}"
+
+        local y_col="${RED}"
+        [ "${y_score}" -gt 0 ] && y_col="${YELLOW}"
+        [ "${y_max}" -gt 0 ] && [ "${y_score}" -eq "${y_max}" ] && y_col="${GREEN}"
+
+        printf "\r\033[K%-4s %-32s %b%s/%s%b        %b%s/%s%b        %b\n" \
+            "${i}" "${c_name}" "${d_col}" "${d_score}" "${d_max}" "${NC}" "${y_col}" "${y_score}" "${y_max}" "${NC}" "${gw_safe}"
+
+        cand_scores_d="${cand_scores_d} ${i}:${d_score}"
+        cand_scores_y="${cand_scores_y} ${i}:${y_score}"
+
+        # Early exit check: 100% on both repeats and gateway-friendly
+        if [ "${d_max}" -gt 0 ] && [ "${y_max}" -gt 0 ] && \
+           [ "${d_score}" -eq "${d_max}" ] && [ "${y_score}" -eq "${y_max}" ] && \
+           is_gateway_friendly "${c_tls}"; then
+            printf "\n"
+            tui_success "Найден надежный универсальный бандл #${i} (${c_name})! Переход к сборке."
+            perfect_cand="${i}"
+            break
+        fi
+
+        i=$(( i + 1 ))
+    done
+
+    echo ""
+    tui_header "Pass 2: Сборка и совместная проверка лучших сочетаний"
+
+    # Select top candidates
+    local top_d_list=""
+    local top_y_list=""
+
+    if [ "${perfect_cand}" -gt 0 ]; then
+        top_d_list="${perfect_cand}"
+        top_y_list="${perfect_cand}"
+    else
+        # Find top Discord candidates prioritizing gateway-friendly
+        local sorted_d
+        sorted_d=$(echo "${cand_scores_d}" | tr ' ' '\n' | awk -F: '$2 > 0' | sort -t: -k2,2nr -k1,1n)
+
+        local d_count=0
+        for entry in ${sorted_d}; do
+            local idx
+            idx=$(echo "${entry}" | cut -d: -f1)
+            local tls
+            tls=$(get_candidate_tls "${idx}")
+            if is_gateway_friendly "${tls}"; then
+                top_d_list="${top_d_list} ${idx}"
+                d_count=$(( d_count + 1 ))
+                [ "${d_count}" -ge 3 ] && break
+            fi
+        done
+
+        # Non-fatal fallback: if gateway-friendly shortlist is empty, take top by score with warning
+        if [ "${d_count}" -eq 0 ]; then
+            tui_warn "Gateway-friendly кандидаты не найдены. Используем лучшие бандлы по общему счету."
+            top_d_list=$(echo "${sorted_d}" | head -n3 | cut -d: -f1 | tr '\n' ' ')
+        fi
+
+        local sorted_y
+        sorted_y=$(echo "${cand_scores_y}" | tr ' ' '\n' | awk -F: '$2 > 0' | sort -t: -k2,2nr -k1,1n)
+        top_y_list=$(echo "${sorted_y}" | head -n3 | cut -d: -f1 | tr '\n' ' ')
+    fi
+
+    local best_min=-1
+    local best_sum=-1
+    local best_len=99999
+    local best_d_idx=1
+    local best_y_idx=1
+    local attempt=0
+    local max_tests=9
+    local combo_res_file="${Z2M_TMP}/gen_combos.$$"
+    : > "${combo_res_file}" 2>/dev/null
+
+    for d_idx in ${top_d_list}; do
+        for y_idx in ${top_y_list}; do
+            attempt=$(( attempt + 1 ))
+            [ "${attempt}" -gt "${max_tests}" ] && break 2
+
+            local d_name y_name d_tls y_tls
+            d_name=$(get_candidate_name "${d_idx}")
+            y_name=$(get_candidate_name "${y_idx}")
+            d_tls=$(get_candidate_tls "${d_idx}")
+            y_tls=$(get_candidate_tls "${y_idx}")
+
+            tui_info "Проверка сочетания [${attempt}]: Discord: «${d_name}» + YouTube: «${y_name}»..."
+
+            local combo_args
+            combo_args=$(combo_build_args "${d_tls}" "${y_tls}" "${d_tls}")
+            if ! zapret_set_opt "${combo_args}"; then
+                tui_warn "Не удалось применить сочетание; пропускаем его."
+                continue
+            fi
+
+            # Probe Discord & YouTube with 2 repeats for stability.
+            # Both host lists of a repeat run concurrently (probe_lists2).
+            local cd_res1 cd_res2 cy_res1 cy_res2 p1 p2
+            p1=$(probe_lists2 "${DISCORD_PROBE_HOSTS}" "${YOUTUBE_PROBE_HOSTS}")
+            cd_res1=$(echo "${p1}" | sed -n 1p)
+            cy_res1=$(echo "${p1}" | sed -n 2p)
+            local cd_s1 cd_s2 cy_s1 cy_s2
+            local cd_m1 cd_m2 cy_m1 cy_m2
+            cd_s1=$(echo "${cd_res1}" | awk '{print $3 + 0}')
+            cy_s1=$(echo "${cy_res1}" | awk '{print $3 + 0}')
+            cd_m1=$(echo "${cd_res1}" | awk '{print $4 + 0}')
+            cy_m1=$(echo "${cy_res1}" | awk '{print $4 + 0}')
+
+            if [ "${cd_s1}" -eq 0 ] && [ "${cy_s1}" -eq 0 ]; then
+                cd_s2=0; cy_s2=0; cd_m2="${cd_m1}"; cy_m2="${cy_m1}"
+            else
+                sleep "${Z2M_PROBE_REPEAT_DELAY:-1}"
+                p2=$(probe_lists2 "${DISCORD_PROBE_HOSTS}" "${YOUTUBE_PROBE_HOSTS}")
+                cd_res2=$(echo "${p2}" | sed -n 1p)
+                cy_res2=$(echo "${p2}" | sed -n 2p)
+                cd_s2=$(echo "${cd_res2}" | awk '{print $3 + 0}')
+                cy_s2=$(echo "${cy_res2}" | awk '{print $3 + 0}')
+                cd_m2=$(echo "${cd_res2}" | awk '{print $4 + 0}')
+                cy_m2=$(echo "${cy_res2}" | awk '{print $4 + 0}')
+            fi
+
+            # Sum of two repeats instead of integer average
+            local cd_score=$(( cd_s1 + cd_s2 ))
+            local cy_score=$(( cy_s1 + cy_s2 ))
+            local cd_max_total=$(( cd_m1 + cd_m2 ))
+            local cy_max_total=$(( cy_m1 + cy_m2 ))
+
+            # Pass 2 score = min(score_D, score_Y)
+            local cur_min
+            if [ "${cd_score}" -le "${cy_score}" ]; then
+                cur_min="${cd_score}"
+            else
+                cur_min="${cy_score}"
+            fi
+            local cur_sum=$(( cd_score + cy_score ))
+            local cur_len=$(( ${#d_tls} + ${#y_tls} ))
+
+            printf "  -> Результат: Discord: %s/%s, YouTube: %s/%s (Min: %s, Sum: %s)\n" \
+                "${cd_score}" "${cd_max_total}" "${cy_score}" "${cy_max_total}" "${cur_min}" "${cur_sum}"
+
+            # Compare: maximize cur_min, then cur_sum, tie-break on shorter/simpler options
+            local is_better=0
+            if [ "${cur_min}" -gt "${best_min}" ]; then
+                is_better=1
+            elif [ "${cur_min}" -eq "${best_min}" ]; then
+                if [ "${cur_sum}" -gt "${best_sum}" ]; then
+                    is_better=1
+                elif [ "${cur_sum}" -eq "${best_sum}" ] && [ "${cur_len}" -lt "${best_len}" ]; then
+                    is_better=1
+                fi
+            fi
+
+            if [ "${is_better}" -eq 1 ]; then
+                best_min="${cur_min}"
+                best_sum="${cur_sum}"
+                best_len="${cur_len}"
+                best_d_idx="${d_idx}"
+                best_y_idx="${y_idx}"
+            fi
+
+            printf "%s|%s|%s|%s|%s|%s|%s\n" \
+                "${attempt}" "${d_name}" "${y_name}" "${cur_min}" "${cur_sum}" "${d_idx}" "${y_idx}" >> "${combo_res_file}"
+
+            # Early exit: break both loops only when both Discord and YouTube reach 100%
+            if [ "${cd_max_total}" -gt 0 ] && [ "${cy_max_total}" -gt 0 ] && \
+               [ "${cd_score}" -ge "${cd_max_total}" ] && [ "${cy_score}" -ge "${cy_max_total}" ]; then
+                if [ "${Z2M_EARLY_EXIT:-0}" = "1" ] || [ "${Z2M_NONINTERACTIVE:-0}" = "1" ]; then
+                    tui_success "Достигнут максимальный результат (${cd_score}/${cd_max_total}, ${cy_score}/${cy_max_total})! Досрочный выход."
+                    break 2
+                fi
+            fi
+        done
+        [ "${attempt}" -gt "${max_tests}" ] && break
+    done
+
+    # If no strategy passed threshold (> 0), restore backup and inform user
+    if [ "${best_min}" -le 0 ] && [ "${best_sum}" -le 0 ]; then
+        rm -f "${combo_res_file}" 2>/dev/null
+        echo ""
+        tui_error "Ни одна стратегия не смогла обеспечить доступ к тестируемым ресурсам!"
+        tui_warn "Восстанавливаем исходную конфигурацию роутера..."
+        tui_info "Рекомендация: проверьте блокировку провайдером DNS (DoH в меню 6)."
+        tui_pause
+        return 1
+    fi
+
+    # Check against baseline: apply winner only if best_min > baseline, else ask or rollback
+    if [ "${best_min}" -le "${base_min}" ]; then
+        echo ""
+        tui_warn "Сгенерированная комбинация (Min: ${best_min}) не превосходит текущую конфигурацию (Baseline Min: ${base_min})."
+        local ans
+        ans=$(tui_prompt "Применить найденную комбинацию всё равно? [y/N]" "N")
+        case "${ans}" in
+            y|Y|yes|YES)
+                tui_info "Применение подтверждено пользователем."
+                ;;
+            *)
+                rm -f "${combo_res_file}" 2>/dev/null
+                tui_info "Откатываемся к исходной конфигурации (baseline)..."
+                tui_pause
+                return 0
+                ;;
+        esac
+    fi
+
+    local chosen_d_idx="${best_d_idx}"
+    local chosen_y_idx="${best_y_idx}"
+
+    if [ "${Z2M_NONINTERACTIVE:-0}" != "1" ] && [ -s "${combo_res_file}" ]; then
+        echo ""
+        tui_header "Итоги генератора и выбор комбинации"
+        local c_num c_dname c_yname c_min c_sum c_didx c_yidx
+        local best_combo_num=1
+        while IFS='|' read -r c_num c_dname c_yname c_min c_sum c_didx c_yidx; do
+            if [ "${c_didx}" = "${best_d_idx}" ] && [ "${c_yidx}" = "${best_y_idx}" ]; then
+                best_combo_num="${c_num}"
+                printf "  %b%2s. Discord: %-16s + YouTube: %-16s (Баллы: %s) <- Рекомендуется%b\n" \
+                    "${GREEN}${BOLD}" "${c_num}" "${c_dname}" "${c_yname}" "${c_sum}" "${NC}"
+            else
+                printf "  %2s. Discord: %-16s + YouTube: %-16s (Баллы: %s)\n" \
+                    "${c_num}" "${c_dname}" "${c_yname}" "${c_sum}"
+            fi
+        done < "${combo_res_file}"
+        printf "   0. Отмена (оставить текущие настройки)\n\n"
+        local pick_combo
+        pick_combo=$(tui_prompt "Выберите номер комбинации для применения" "${best_combo_num}")
+        if [ "${pick_combo}" = "0" ]; then
+            rm -f "${combo_res_file}" 2>/dev/null
+            tui_info "Отмена выбора. Исходная конфигурация сохранена."
+            tui_pause
+            return 0
+        fi
+        local match_found=0
+        while IFS='|' read -r c_num c_dname c_yname c_min c_sum c_didx c_yidx; do
+            if [ "${c_num}" = "${pick_combo}" ]; then
+                chosen_d_idx="${c_didx}"
+                chosen_y_idx="${c_yidx}"
+                match_found=1
+                break
+            fi
+        done < "${combo_res_file}"
+        if [ "${match_found}" -ne 1 ]; then
+            tui_warn "Неверный номер. Будет применена рекомендованная комбинация."
+            chosen_d_idx="${best_d_idx}"
+            chosen_y_idx="${best_y_idx}"
+        fi
+    fi
+    rm -f "${combo_res_file}" 2>/dev/null
+
+    # Build and permanently apply winning strategy
+    local win_d_name win_y_name win_d_tls win_y_tls
+    win_d_name=$(get_candidate_name "${chosen_d_idx}")
+    win_y_name=$(get_candidate_name "${chosen_y_idx}")
+    win_d_tls=$(get_candidate_tls "${chosen_d_idx}")
+    win_y_tls=$(get_candidate_tls "${chosen_y_idx}")
+
+    local final_opt
+    final_opt=$(combo_build_args "${win_d_tls}" "${win_y_tls}" "${win_d_tls}")
+    if ! zapret_set_opt "${final_opt}"; then
+        tui_error "Не удалось применить итоговую стратегию. Выполняется откат."
+        tui_pause
+        return 1
+    fi
+
+    z2m_transaction_commit
+
+    echo ""
+    tui_header "Итоговая персональная стратегия применена!"
+    tui_success "Discord профиль : ${win_d_name}"
+    tui_success "YouTube профиль : ${win_y_name}"
+    tui_info "Voice Discord   : STUN + IP Discovery (голос проверяется в приложении)"
+    tui_info "Конфигурация успешно сохранена и применена."
+    echo ""
+
+    # Mention that curl checks only TCP/TLS, UDP voice is not tested
+    tui_info "Примечание: Проверка curl тестирует только протоколы TCP и TLS."
+    tui_info "Голосовая связь Discord использует UDP (STUN / RTP)."
+    tui_info "Если звонки не подключаются, попробуйте исправление:"
+    tui_info "  Главное меню -> Пункт 4 (Исправление Discord Voice / custom.d #50)"
+    echo ""
+    tui_pause
+}
