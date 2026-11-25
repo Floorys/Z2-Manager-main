@@ -40,8 +40,8 @@ run_diagnostics() {
     printf "%bАктивный NFQWS2_OPT :%b %b%s%b\n\n" "${BOLD}" "${NC}" "${CYAN}" "${short_opt:-по умолчанию}" "${NC}"
 
     tui_header "1. Проверка доступности доменов (набор как в Zapret-Manager)"
-    printf "%b%-24s %-18s %-10s %-14s%b\n" "${BOLD}" "Хост" "Категория" "Статус" "DPI Вердикт" "${NC}"
-    printf "%b-------------------------------------------------------------------%b\n" "${DGRAY}" "${NC}"
+    printf "%b%-26s %s %s %-14s%b\n" "${BOLD}" "Хост" "$(tui_pad "Категория" 20)" "$(tui_pad "Статус" 11)" "DPI Вердикт" "${NC}"
+    printf "%b-------------------------------------------------------------------------%b\n" "${DGRAY}" "${NC}"
 
     local total_hosts=0
     local ok_hosts=0
@@ -57,7 +57,7 @@ run_diagnostics() {
         cat_name=$(probe_get_host_category "${host}")
 
         # Live progress indicator only on interactive terminals
-        [ -t 1 ] && printf "%-24s %-18s %b[...] Тест%b\r" "${host}" "${cat_name}" "${YELLOW}" "${NC}"
+        [ -t 1 ] && printf "%-26s %s %b[...] Тест%b\r" "${host}" "$(tui_pad "${cat_name}" 20)" "${YELLOW}" "${NC}"
 
         local is_ok=0
         if probe_http_reach "${host}" 2; then
@@ -88,11 +88,11 @@ run_diagnostics() {
             *) dpi_col="${RED}" ;;
         esac
 
-        printf "\r\033[K%-24s %-18s " "${host}" "${cat_name}"
+        printf "\r\033[K%-26s %s " "${host}" "$(tui_pad "${cat_name}" 20)"
         if [ "${is_ok}" -eq 1 ]; then
-            printf "%b%-10s%b " "${GREEN}" "[+] Доступ" "${NC}"
+            printf "%b%s%b " "${GREEN}" "$(tui_pad "[+] Доступ" 11)" "${NC}"
         else
-            printf "%b%-10s%b " "${RED}" "[-] Блок" "${NC}"
+            printf "%b%s%b " "${RED}" "$(tui_pad "[-] Блок" 11)" "${NC}"
         fi
         printf "%b%-14s%b\n" "${dpi_col}" "${dpi_verdict}" "${NC}"
     done

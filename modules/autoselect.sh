@@ -49,15 +49,17 @@ catalog_autoselect() {
     zapret_sync_fake_blobs || { tui_error "Не удалось синхронизировать файлы фейков!"; tui_pause; return 1; }
     zapret_sync_hostlists 0 || { tui_error "Не удалось синхронизировать списки хостов!"; tui_pause; return 1; }
 
-    local baseline result base_score base_fail
-    tui_info "Замер текущей конфигурации теми же пробами (2 повтора)..."
+    local baseline result base_ok base_total base_score base_fail
+    tui_info "Проверка вашей текущей стратегии (2 повтора)..."
     baseline=$(catalog_measure "${hosts}")
+    base_ok=$(echo "${baseline}" | awk '{print $1 + 0}')
+    base_total=$(echo "${baseline}" | awk '{print $2 + 0}')
     base_score=$(echo "${baseline}" | awk '{print $3 + 0}')
     base_fail=$(echo "${baseline}" | awk '{print ($2 - $1) + 0}')
-    tui_info "Baseline: ${base_score}, неуспешных проверок: ${base_fail}"
+    tui_info "Текущая стратегия: доступно ${base_ok}/${base_total} (ошибок: ${base_fail})"
     tui_print_result_table_header
 
-    local best_idx=0 best_score=-1 best_fail=999 i=1
+    local best_idx=0 best_score=-1 best_fail=999 best_ok=0 best_total=0 i=1
     local name opt ok total score maximum fail
     local res_file="${Z2M_TMP}/results.$$"
     : > "${res_file}" 2>/dev/null
@@ -85,6 +87,7 @@ catalog_autoselect() {
             [ "${score}" -eq "${best_score}" ] && [ "${fail}" -lt "${best_fail}" ];
         }; then
             best_idx="${i}"; best_score="${score}"; best_fail="${fail}"
+            best_ok="${ok}"; best_total="${total}"
         fi
         if [ "${maximum}" -gt 0 ] && [ "${score}" -eq "${maximum}" ] && [ "${fail}" -eq 0 ]; then
             if [ "${Z2M_EARLY_EXIT:-0}" = "1" ] || [ "${Z2M_NONINTERACTIVE:-0}" = "1" ]; then
@@ -96,21 +99,28 @@ catalog_autoselect() {
     done
     if [ "${best_score}" -le 0 ]; then
         rm -f "${res_file}" 2>/dev/null
-        tui_error "Ни одна стратегия не прошла проверки. Выполняется откат."
+        tui_error "Ни одна стратегия не прошла проверки. Возвращаем исходную конфигурацию."
         tui_pause
         return 1
     fi
+
+    local best_name
+    best_name=$(catalog_get_name "${best_idx}")
+    echo ""
+    tui_success "Лучший результат в каталоге: #${best_idx} «${best_name}» (${best_ok}/${best_total}, ошибок: ${best_fail})."
+
     # Equal results also retain the user's configuration by default.
     if [ "${best_score}" -lt "${base_score}" ] || {
         [ "${best_score}" -eq "${base_score}" ] && [ "${best_fail}" -ge "${base_fail}" ];
     }; then
+        tui_warn "Ваша текущая стратегия уже даёт ${base_ok}/${base_total} (ошибок: ${base_fail}) — замена не даст улучшения."
         local answer
-        answer=$(tui_prompt "Результат не лучше baseline. Применить всё равно? [y/N]" "N")
+        answer=$(tui_prompt "Всё равно выбрать и применить стратегию из каталога? [y/N]" "N")
         case "${answer}" in
             y|Y|yes|YES) ;;
             *)
                 rm -f "${res_file}" 2>/dev/null
-                tui_info "Сохраняем исходную конфигурацию."
+                tui_info "Сохраняем текущую конфигурацию."
                 tui_pause
                 return 0
                 ;;
@@ -124,11 +134,11 @@ catalog_autoselect() {
         local r_idx r_name r_ok r_tot r_sc r_fl
         while IFS='|' read -r r_idx r_name r_ok r_tot r_sc r_fl; do
             if [ "${r_idx}" = "${best_idx}" ]; then
-                printf "  %b%2s. %-32s [%s/%s доступно] <- Рекомендуется%b\n" \
-                    "${GREEN}${BOLD}" "${r_idx}" "${r_name}" "${r_ok}" "${r_tot}" "${NC}"
+                printf "  %b%2s. %s [%s/%s доступно] <- Лучшая%b\n" \
+                    "${GREEN}${BOLD}" "${r_idx}" "$(tui_pad "${r_name}" 42)" "${r_ok}" "${r_tot}" "${NC}"
             else
-                printf "  %2s. %-32s [%s/%s доступно]\n" \
-                    "${r_idx}" "${r_name}" "${r_ok}" "${r_tot}"
+                printf "  %2s. %s [%s/%s доступно]\n" \
+                    "${r_idx}" "$(tui_pad "${r_name}" 42)" "${r_ok}" "${r_tot}"
             fi
         done < "${res_file}"
         printf "   0. Отмена (оставить текущие настройки)\n\n"
@@ -175,8 +185,8 @@ run_test_current_strategy() {
         return 1
     fi
     tui_info "Опрос контрольных доменов (HTTP и TLS 1.2)..."
-    printf '%-28s %-20s %-12s %-12s\n' "Хост" "Категория" "HTTP Доступ" "TLS 1.2"
-    printf '%b-------------------------------------------------------------------%b\n' "${DGRAY}" "${NC}"
+    printf '%s %s %s %s\n' "$(tui_pad "Хост" 28)" "$(tui_pad "Категория" 20)" "$(tui_pad "HTTP Доступ" 12)" "TLS 1.2"
+    printf '%b-------------------------------------------------------------------------%b\n' "${DGRAY}" "${NC}"
     local http_map tls_map h http_res tls_res http_str tls_str
     http_map=$(probe_hosts_map "${DIAGNOSTIC_HOSTS}")
     tls_map=$(probe_hosts_map "${DIAGNOSTIC_HOSTS}" "${Z2M_PROBE_TIMEOUT:-2}" tls12)
@@ -184,16 +194,16 @@ run_test_current_strategy() {
         http_res=$(echo "${http_map}" | awk -v h="${h}" '$1 == h { print $2 }')
         tls_res=$(echo "${tls_map}" | awk -v h="${h}" '$1 == h { print $2 }')
         if [ "${http_res}" = "1" ]; then
-            http_str="${GREEN}OK${NC}  "
+            http_str="${GREEN}$(tui_pad "OK" 12)${NC}"
         else
-            http_str="${RED}Блок${NC}"
+            http_str="${RED}$(tui_pad "Блок" 12)${NC}"
         fi
         if [ "${tls_res}" = "1" ]; then
-            tls_str="${GREEN}OK${NC}  "
+            tls_str="${GREEN}OK${NC}"
         else
             tls_str="${RED}Сбой${NC}"
         fi
-        printf '%-28s %-20s %b        %b\n' "${h}" "$(probe_get_host_category "${h}")" "${http_str}" "${tls_str}"
+        printf '%s %s %b %b\n' "$(tui_pad "${h}" 28)" "$(tui_pad "$(probe_get_host_category "${h}")" 20)" "${http_str}" "${tls_str}"
     done
     tui_pause
 }

@@ -297,7 +297,7 @@ manual_catalog_menu() {
         local name tagline
         name=$(catalog_get_name "${i}")
         tagline=$(catalog_get_tagline "${i}")
-        printf "  %b%2s.%b %-36s %b%s%b\n" "${BOLD}" "${i}" "${NC}" "${name}" "${DGRAY}" "${tagline}" "${NC}"
+        printf "  %b%2s.%b %s %b%s%b\n" "${BOLD}" "${i}" "${NC}" "$(tui_pad "${name}" 44)" "${DGRAY}" "${tagline}" "${NC}"
         i=$(( i + 1 ))
     done
     printf "   0. Назад в главное меню\n\n"

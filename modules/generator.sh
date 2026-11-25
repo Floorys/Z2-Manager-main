@@ -26,7 +26,7 @@ strategy_generator_worker() {
     tui_header "Генератор персональной стратегии (Asterlike Two-Pass Generator)"
 
     tui_info "Этот режим подбирает уникальную связку десинка:"
-    tui_info "1. Замер baseline: проверка текущей стратегии тем же набором проб."
+    tui_info "1. Проверка текущей стратегии (чтобы не ухудшить работающий обход)."
     tui_info "2. Pass 1: перебор кандидатов раздельно для Discord и YouTube (с повторами)."
     tui_info "3. Pass 2: совместное тестирование лучших пар с учетом Gateway Discord."
     echo ""
@@ -57,7 +57,7 @@ strategy_generator_worker() {
     tui_info "Исходная конфигурация сохранена."
 
     # Baseline measurement of the current strategy using the exact same probe suite
-    tui_info "Замер текущей конфигурации (baseline) перед поиском..."
+    tui_info "Проверка вашей текущей стратегии перед поиском..."
     local base_d_score=0 base_y_score=0
     local base_min=0 base_sum=0
     local b_d_max=0 b_y_max=0
@@ -98,7 +98,7 @@ strategy_generator_worker() {
         base_min="${base_y_score}"
     fi
     base_sum=$(( base_d_score + base_y_score ))
-    tui_info "Baseline: Discord: ${base_d_score}/${b_d_max}, YouTube: ${base_y_score}/${b_y_max} (Min: ${base_min}, Sum: ${base_sum})"
+    tui_info "Текущая стратегия: Discord $(( base_d_score / 5 ))/$(( b_d_max / 5 )), YouTube $(( base_y_score / 5 ))/$(( b_y_max / 5 ))"
     echo ""
 
     tui_info "Запуск Pass 1: тестирование ${CANDIDATES_COUNT} десинк-бандлов (по 2 повтора)..."
@@ -108,8 +108,8 @@ strategy_generator_worker() {
     local t_start
     t_start=$(date +%s)
 
-    printf "%b%-4s %-32s %-12s %-12s %-8s%b\n" "${BOLD}" "№" "Кандидат" "Discord" "YouTube" "GW-Safe" "${NC}"
-    printf "%b-------------------------------------------------------------------%b\n" "${DGRAY}" "${NC}"
+    printf "%b%-4s %s %-12s %-12s %-8s%b\n" "${BOLD}" "№" "$(tui_pad "Кандидат" 32)" "Discord" "YouTube" "GW-Safe" "${NC}"
+    printf "%b------------------------------------------------------------------------%b\n" "${DGRAY}" "${NC}"
 
     local cand_scores_d=""
     local cand_scores_y=""
@@ -130,15 +130,15 @@ strategy_generator_worker() {
             gw_safe="${GREEN}Да${NC}"
         fi
 
-        printf "\r\033[K%-4s %-32s %b[..] Тест... [%s/%s, %ss]%b" \
-            "${i}" "${c_name}" "${YELLOW}" "${i}" "${CANDIDATES_COUNT}" "$(( $(date +%s) - t_start ))" "${NC}"
+        printf "\r\033[K%-4s %s %b[..] Тест... [%s/%s, %ss]%b" \
+            "${i}" "$(tui_pad "${c_name}" 32)" "${YELLOW}" "${i}" "${CANDIDATES_COUNT}" "$(( $(date +%s) - t_start ))" "${NC}"
 
         # Apply candidate as standalone test rule
         local test_opt
         test_opt=$(combo_build_single_test_args "${c_tls}")
         if ! zapret_set_opt "${test_opt}"; then
-            printf "\r\033[K%-4s %-32s %b%-12s%b %b%-12s%b %b\n" \
-                "${i}" "${c_name}" "${RED}" "Сбой" "${NC}" "${RED}" "Сбой" "${NC}" "${gw_safe}"
+            printf "\r\033[K%-4s %s %b%s%b %b%s%b %b\n" \
+                "${i}" "$(tui_pad "${c_name}" 32)" "${RED}" "$(tui_pad "Сбой" 12)" "${NC}" "${RED}" "$(tui_pad "Сбой" 12)" "${NC}" "${gw_safe}"
             cand_scores_d="${cand_scores_d} ${i}:0"
             cand_scores_y="${cand_scores_y} ${i}:0"
             i=$(( i + 1 ))
@@ -147,8 +147,8 @@ strategy_generator_worker() {
 
         # If daemon crashed or failed to start, score 0 and move on immediately
         if ! zapret_is_running; then
-            printf "\r\033[K%-4s %-32s %b%-12s%b %b%-12s%b %b\n" \
-                "${i}" "${c_name}" "${RED}" "Сбой" "${NC}" "${RED}" "Сбой" "${NC}" "${gw_safe}"
+            printf "\r\033[K%-4s %s %b%s%b %b%s%b %b\n" \
+                "${i}" "$(tui_pad "${c_name}" 32)" "${RED}" "$(tui_pad "Сбой" 12)" "${NC}" "${RED}" "$(tui_pad "Сбой" 12)" "${NC}" "${gw_safe}"
             cand_scores_d="${cand_scores_d} ${i}:0"
             cand_scores_y="${cand_scores_y} ${i}:0"
             i=$(( i + 1 ))
@@ -191,8 +191,8 @@ strategy_generator_worker() {
         [ "${y_score}" -gt 0 ] && y_col="${YELLOW}"
         [ "${y_max}" -gt 0 ] && [ "${y_score}" -eq "${y_max}" ] && y_col="${GREEN}"
 
-        printf "\r\033[K%-4s %-32s %b%s/%s%b        %b%s/%s%b        %b\n" \
-            "${i}" "${c_name}" "${d_col}" "${d_score}" "${d_max}" "${NC}" "${y_col}" "${y_score}" "${y_max}" "${NC}" "${gw_safe}"
+        printf "\r\033[K%-4s %s %b%-12s%b %b%-12s%b %b\n" \
+            "${i}" "$(tui_pad "${c_name}" 32)" "${d_col}" "${d_score}/${d_max}" "${NC}" "${y_col}" "${y_score}/${y_max}" "${NC}" "${gw_safe}"
 
         cand_scores_d="${cand_scores_d} ${i}:${d_score}"
         cand_scores_y="${cand_scores_y} ${i}:${y_score}"
@@ -370,19 +370,24 @@ strategy_generator_worker() {
         return 1
     fi
 
+    local best_d_name best_y_name
+    best_d_name=$(get_candidate_name "${best_d_idx}")
+    best_y_name=$(get_candidate_name "${best_y_idx}")
+    echo ""
+    tui_success "Лучшая найденная связка: Discord «${best_d_name}» + YouTube «${best_y_name}»."
+
     # Check against baseline: apply winner only if best_min > baseline, else ask or rollback
     if [ "${best_min}" -le "${base_min}" ]; then
-        echo ""
-        tui_warn "Сгенерированная комбинация (Min: ${best_min}) не превосходит текущую конфигурацию (Baseline Min: ${base_min})."
+        tui_warn "Она не превосходит вашу текущую стратегию (текущая: Discord $(( base_d_score / 5 ))/$(( b_d_max / 5 )), YouTube $(( base_y_score / 5 ))/$(( b_y_max / 5 )))."
         local ans
-        ans=$(tui_prompt "Применить найденную комбинацию всё равно? [y/N]" "N")
+        ans=$(tui_prompt "Всё равно выбрать и применить найденную связку? [y/N]" "N")
         case "${ans}" in
             y|Y|yes|YES)
                 tui_info "Применение подтверждено пользователем."
                 ;;
             *)
                 rm -f "${combo_res_file}" 2>/dev/null
-                tui_info "Откатываемся к исходной конфигурации (baseline)..."
+                tui_info "Сохраняем текущую конфигурацию..."
                 tui_pause
                 return 0
                 ;;
@@ -400,11 +405,11 @@ strategy_generator_worker() {
         while IFS='|' read -r c_num c_dname c_yname c_min c_sum c_didx c_yidx; do
             if [ "${c_didx}" = "${best_d_idx}" ] && [ "${c_yidx}" = "${best_y_idx}" ]; then
                 best_combo_num="${c_num}"
-                printf "  %b%2s. Discord: %-16s + YouTube: %-16s (Баллы: %s) <- Рекомендуется%b\n" \
-                    "${GREEN}${BOLD}" "${c_num}" "${c_dname}" "${c_yname}" "${c_sum}" "${NC}"
+                printf "  %b%2s. Discord: %s + YouTube: %s <- Лучшая%b\n" \
+                    "${GREEN}${BOLD}" "${c_num}" "$(tui_pad "${c_dname}" 28)" "$(tui_pad "${c_yname}" 28)" "${NC}"
             else
-                printf "  %2s. Discord: %-16s + YouTube: %-16s (Баллы: %s)\n" \
-                    "${c_num}" "${c_dname}" "${c_yname}" "${c_sum}"
+                printf "  %2s. Discord: %s + YouTube: %s\n" \
+                    "${c_num}" "$(tui_pad "${c_dname}" 28)" "$(tui_pad "${c_yname}" 28)"
             fi
         done < "${combo_res_file}"
         printf "   0. Отмена (оставить текущие настройки)\n\n"

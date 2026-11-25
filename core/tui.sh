@@ -86,9 +86,25 @@ tui_prompt() {
     fi
 }
 
+# Pad text to a display width in UTF-8 characters (avoids byte-width drift on Cyrillic).
+tui_pad() {
+    local text="$1" width="$2"
+    LC_ALL=C awk -v s="${text}" -v w="${width}" 'BEGIN {
+        c = s
+        gsub(/[\200-\277]/, "", c)
+        pad = w - length(c)
+        printf "%s", s
+        for (i = 0; i < pad; i++) printf " "
+    }'
+}
+
 tui_print_result_table_header() {
-    printf "%b%-42s %-10s %-10s %-10s%b\n" "${BOLD}" "Стратегия / Бандл" "Успешно" "Ошибок" "Статус" "${NC}"
-    printf "%b-------------------------------------------------------------------%b\n" "${DGRAY}" "${NC}"
+    printf "%b%s %s %s %s%b\n" "${BOLD}" \
+        "$(tui_pad "Стратегия / Бандл" 44)" \
+        "$(tui_pad "Успешно" 10)" \
+        "$(tui_pad "Ошибок" 10)" \
+        "Статус" "${NC}"
+    printf "%b-----------------------------------------------------------------------------%b\n" "${DGRAY}" "${NC}"
 }
 
 tui_print_result_row() {
@@ -107,7 +123,6 @@ tui_print_result_row() {
         color="${RED}"
     fi
 
-    # Do not cut multibyte UTF-8 characters with byte-based printf formatters
-    printf "%-42s %b%-10s%b %b%-10s%b %b%s %s/%s%b\n" \
-        "${name}" "${GREEN}" "${ok}" "${NC}" "${RED}" "${fail}" "${NC}" "${color}" "${glyph}" "${ok}" "${total}" "${NC}"
+    printf "%s %b%-10s%b %b%-10s%b %b%s %s/%s%b\n" \
+        "$(tui_pad "${name}" 44)" "${GREEN}" "${ok}" "${NC}" "${RED}" "${fail}" "${NC}" "${color}" "${glyph}" "${ok}" "${total}" "${NC}"
 }

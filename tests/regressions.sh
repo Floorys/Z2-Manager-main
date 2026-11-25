@@ -653,6 +653,15 @@ update_all_no_exec() (
 )
 check "run_update_all invokes run_self_update with --no-exec" update_all_no_exec
 
+tui_pad_utf8_width() (
+    local a b
+    a=$(tui_pad "Комбо" 10)
+    b=$(tui_pad "Hello" 10)
+    [ "$(printf '%s' "${a}" | LC_ALL=C awk '{gsub(/[\200-\277]/,""); print length($0)}')" -eq 10 ] &&
+        [ "$(printf '%s' "${b}" | LC_ALL=C awk '{gsub(/[\200-\277]/,""); print length($0)}')" -eq 10 ]
+)
+check "tui_pad aligns Cyrillic and ASCII strings to identical character width" tui_pad_utf8_width
+
 shell_syntax() {
     find "${ROOT}" -name '*.sh' -exec sh -n {} \; > "${TMP_ROOT}/syntax-log" 2>&1
     [ ! -s "${TMP_ROOT}/syntax-log" ]
