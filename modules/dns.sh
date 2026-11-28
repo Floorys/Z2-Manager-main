@@ -8,6 +8,8 @@
 [ -f "${Z2M_DIR}/core/config.sh" ] && . "${Z2M_DIR}/core/config.sh"
 [ -f "${Z2M_DIR}/core/tui.sh" ] && . "${Z2M_DIR}/core/tui.sh"
 [ -f "${Z2M_DIR}/core/probe.sh" ] && . "${Z2M_DIR}/core/probe.sh"
+[ -f "${Z2M_DIR}/core/combo_builder.sh" ] && . "${Z2M_DIR}/core/combo_builder.sh"
+[ -f "${Z2M_DIR}/core/zapret_service.sh" ] && . "${Z2M_DIR}/core/zapret_service.sh"
 
 get_current_dns() {
     local dns_list=""
@@ -41,12 +43,30 @@ run_dns_menu() {
             doh_status="${GREEN}Работает (https-dns-proxy)${NC}"
         fi
         printf "  %bСтатус DoH :%b %b\n" "${BOLD}" "${NC}" "${doh_status}"
+
+        local doh_fix_mode doh_fix_badge
+        doh_fix_mode=$(doh_fix_get_mode)
+        case "${doh_fix_mode}" in
+            auto)
+                local active_doh
+                active_doh=$(combo_get_uci_doh_domains)
+                doh_fix_badge="${GREEN}Включен (авто: ${active_doh:-пресеты})${NC}"
+                ;;
+            all)
+                doh_fix_badge="${GREEN}Включен (все серверы + активный)${NC}"
+                ;;
+            *)
+                doh_fix_badge="${YELLOW}Отключен${NC}"
+                ;;
+        esac
+        printf "  %bФикс DoH   :%b %b\n" "${BOLD}" "${NC}" "${doh_fix_badge}"
         printf "%b  -------------------------------------------------------------------%b\n\n" "${DGRAY}" "${NC}"
 
         printf "  1. Проверить DNS на подмену (DNS Poisoning / заглушка РКН)\n"
-        printf "  2. Настроить DNS-over-HTTPS (DoH: Google, Quad9, Xbox, DNS.ru...)\n"
+        printf "  2. Настроить DNS-over-HTTPS (DoH: Google, Quad9, Xbox, Malw...)\n"
         printf "  3. Установить безопасные DNS в dnsmasq (без шифрования)\n"
         printf "  4. Отключить DoH и сбросить DNS на стандартные провайдера\n"
+        printf "  5. Фикс блокировки DoH в Zapret2 (обход DPI для DoH-серверов)\n"
         printf "  0. Назад в главное меню\n\n"
 
         local choice
@@ -64,6 +84,9 @@ run_dns_menu() {
                 ;;
             4)
                 _disable_doh
+                ;;
+            5)
+                run_doh_fix_menu
                 ;;
             0)
                 break
@@ -146,11 +169,14 @@ _setup_doh() {
     tui_header "Выбор провайдера DNS-over-HTTPS (DoH)"
     printf "  %b1.%b Google DNS      %b(https://dns.google/dns-query | 8.8.8.8)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
     printf "  %b2.%b Quad9 DNS       %b(https://dns.quad9.net/dns-query | 9.9.9.9, без цензуры)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
-    printf "  %b3.%b Xbox / Comss    %b(https://dns.comss.one/dns-query | обход блокировок консолей)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b3.%b Xbox / Comss    %b(https://dns.comss.one/dns-query | обход гео-блоков)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
     printf "  %b4.%b DNS.ru / Yandex %b(https://common.dot.dns.yandex.net/dns-query | быстрый RU)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
     printf "  %b5.%b Cloudflare DNS  %b(https://cloudflare-dns.com/dns-query | 1.1.1.1)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
     printf "  %b6.%b AdGuard DNS     %b(https://dns.adguard.com/dns-query | блокировка рекламы)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
-    printf "  %b7.%b Пользовательский DoH URL\n" "${BOLD}" "${NC}"
+    printf "  %b7.%b Malw.link DNS   %b(https://dns.malw.link/dns-query | обход гео-блоков в РФ)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b8.%b Xbox-DNS.ru     %b(https://xbox-dns.ru/dns-query | консоли и гео-блоки)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf "  %b9.%b ControlD Free   %b(https://freedns.controld.com/p0 | без цензуры)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+    printf " %b10.%b Пользовательский DoH URL\n" "${BOLD}" "${NC}"
     printf "  %b0.%b Отмена\n\n" "${BOLD}" "${NC}"
 
     local p_choice
@@ -191,6 +217,21 @@ _setup_doh() {
             bootstrap_ips="94.140.14.14,94.140.15.15"
             ;;
         7)
+            doh_url="https://dns.malw.link/dns-query"
+            doh_name="Malw.link DNS"
+            bootstrap_ips="179.254.166.171,77.88.8.8"
+            ;;
+        8)
+            doh_url="https://xbox-dns.ru/dns-query"
+            doh_name="Xbox-DNS.ru"
+            bootstrap_ips="111.88.96.57,77.88.8.8"
+            ;;
+        9)
+            doh_url="https://freedns.controld.com/p0"
+            doh_name="ControlD Free DNS"
+            bootstrap_ips="76.76.2.0,76.76.10.0"
+            ;;
+        10)
             doh_url=$(tui_prompt "Введите полный DoH URL" "https://dns.google/dns-query")
             doh_name="Custom DoH"
             bootstrap_ips="8.8.8.8,1.1.1.1"
@@ -258,6 +299,9 @@ _setup_doh() {
         local dns_config_ok=1
         dns_configure_doh_section "${bootstrap_ips}" "${doh_url}" || dns_config_ok=0
         uci commit https-dns-proxy 2>/dev/null || dns_config_ok=0
+        if doh_fix_is_enabled && [ "${dns_config_ok}" -eq 1 ]; then
+            doh_fix_refresh || true
+        fi
 
         /etc/init.d/https-dns-proxy enable >/dev/null 2>&1
         /etc/init.d/https-dns-proxy restart >/dev/null 2>&1
@@ -292,6 +336,9 @@ _setup_doh() {
             fi
             if [ "${doh_was_enabled}" -ne 1 ] && [ -x /etc/init.d/https-dns-proxy ]; then
                 /etc/init.d/https-dns-proxy disable >/dev/null 2>&1
+            fi
+            if doh_fix_is_enabled; then
+                doh_fix_refresh || true
             fi
             if [ "${doh_was_running}" -eq 1 ]; then
                 /etc/init.d/https-dns-proxy restart >/dev/null 2>&1
@@ -367,4 +414,129 @@ _disable_doh() {
     /etc/init.d/dnsmasq restart >/dev/null 2>&1
     tui_success "DNS успешно сброшен на параметры провайдера."
     tui_pause
+}
+
+doh_fix_apply() {
+    local mode="${1:-auto}"
+    case "${mode}" in
+        auto|all) ;;
+        *) return 2 ;;
+    esac
+    z2m_run_guarded doh_fix_apply_worker "${mode}"
+}
+
+doh_fix_apply_worker() {
+    local mode="${1:-auto}"
+    zapret_is_installed || { tui_error "Zapret2 не установлен."; return 1; }
+    local state_file domains doh_profile cur_opt new_opt
+    state_file=$(doh_fix_state_file)
+    mkdir -p "${ZAPRET2_DIR}" 2>/dev/null || return 1
+    printf '%s\n' "${mode}" > "${state_file}" || return 1
+
+    domains=$(doh_fix_resolve_domains "${mode}")
+    doh_profile=$(doh_fix_build_profile "${mode}")
+    cur_opt=$(zapret_get_opt)
+    new_opt=$(combo_patch_doh_opt "${cur_opt}" "${doh_profile}")
+    [ -n "${new_opt}" ] || return 1
+
+    zapret_set_opt "${new_opt}" || return 1
+    z2m_transaction_commit
+    tui_success "Фикс DoH применён (${mode}): ${domains}"
+    return 0
+}
+
+doh_fix_remove() {
+    z2m_run_guarded doh_fix_remove_worker
+}
+
+doh_fix_remove_worker() {
+    zapret_is_installed || { tui_error "Zapret2 не установлен."; return 1; }
+    local state_file cur_opt new_opt
+    state_file=$(doh_fix_state_file)
+    rm -f "${state_file}" 2>/dev/null || return 1
+    cur_opt=$(zapret_get_opt)
+    new_opt=$(combo_patch_doh_opt "${cur_opt}" "")
+    if [ -n "${new_opt}" ] && [ "${new_opt}" != "${cur_opt}" ]; then
+        zapret_set_opt "${new_opt}" || return 1
+    fi
+    z2m_transaction_commit
+    tui_success "Фикс DoH отключён."
+    return 0
+}
+
+doh_fix_refresh() {
+    local mode
+    mode=$(doh_fix_get_mode)
+    [ "${mode}" != "off" ] || return 0
+    doh_fix_apply "${mode}" >/dev/null 2>&1
+}
+
+doh_fix_check_servers() {
+    tui_banner
+    tui_header "Проверка доступности DoH-серверов (HTTPS / TCP 443)"
+    if ! probe_check_deps; then
+        tui_error "Не найдены curl или wget — проверка невозможна."
+        tui_pause
+        return 1
+    fi
+
+    local list
+    list=$(doh_fix_resolve_domains "all" | tr ',' ' ')
+    local h
+    for h in ${list}; do
+        if probe_fast_tls "${h}" 443 3; then
+            tui_success "${h}: доступен"
+        else
+            tui_warn "${h}: заблокирован или недоступен"
+        fi
+    done
+    echo ""
+    tui_info "Активный DoH в https-dns-proxy: $(combo_get_uci_doh_domains || echo "не настроен")"
+    tui_pause
+}
+
+run_doh_fix_menu() {
+    local choice
+    while :; do
+        tui_banner
+        local mode active domains
+        mode=$(doh_fix_get_mode)
+        active=$(combo_get_uci_doh_domains)
+        domains=$(doh_fix_resolve_domains "${mode}")
+        tui_header "Фикс блокировки DoH в Zapret2"
+        printf "  %bРежим фикса  :%b %s\n" "${BOLD}" "${NC}" "${mode}"
+        printf "  %bАктивный DoH :%b %s\n" "${BOLD}" "${NC}" "${active:-не настроен в https-dns-proxy}"
+        [ -n "${domains}" ] && printf "  %bДомены фикса :%b %s\n" "${BOLD}" "${NC}" "${domains}"
+        printf "%b  -------------------------------------------------------------------%b\n\n" "${DGRAY}" "${NC}"
+
+        printf "  1. Включить авто-фикс под текущий DoH (читает https-dns-proxy)\n"
+        printf "  2. Включить фикс для всех гео-анблок и популярных DoH\n"
+        printf "     %b(comss.one, xbox-dns.ru, malw.link, controld, quad9, google, cf)%b\n" "${DGRAY}" "${NC}"
+        printf "  3. Проверить доступность DoH-серверов сейчас\n"
+        printf "  4. Отключить фикс DoH\n"
+        printf "  0. Назад\n\n"
+
+        choice=$(tui_prompt "Выберите действие" "0")
+        case "${choice}" in
+            1)
+                doh_fix_apply "auto" && tui_pause || tui_pause
+                ;;
+            2)
+                doh_fix_apply "all" && tui_pause || tui_pause
+                ;;
+            3)
+                doh_fix_check_servers
+                ;;
+            4)
+                doh_fix_remove && tui_pause || tui_pause
+                ;;
+            0)
+                return 0
+                ;;
+            *)
+                tui_warn "Неверный выбор"
+                sleep 1
+                ;;
+        esac
+    done
 }

@@ -662,6 +662,62 @@ tui_pad_utf8_width() (
 )
 check "tui_pad aligns Cyrillic and ASCII strings to identical character width" tui_pad_utf8_width
 
+doh_fix_auto_and_lifecycle() (
+    fixture
+    uci() {
+        case "$1" in
+            show)
+                printf "https-dns-proxy.@https-dns-proxy[0]=https-dns-proxy\n"
+                printf "https-dns-proxy.@https-dns-proxy[0].resolver_url='https://dns.malw.link/dns-query'\n"
+                printf "https-dns-proxy.@https-dns-proxy[1].url_prefix='https://dns.comss.one:443/dns-query'\n"
+                ;;
+            *) return 1 ;;
+        esac
+    }
+    local base_opt
+    base_opt=$(combo_build_args safe safe) || return 1
+    zapret_set_opt "${base_opt}" >/dev/null 2>&1 || return 1
+
+    # Enable auto DoH fix: detects malw.link and comss.one from UCI
+    doh_fix_apply auto >/dev/null 2>&1 || return 1
+    [ "$(doh_fix_get_mode)" = "auto" ] || return 1
+    local opt1
+    opt1=$(zapret_get_opt)
+    echo "${opt1}" | grep -Fq -- '--hostlist-domains=dns.malw.link,dns.comss.one' || return 1
+    echo "${opt1}" | grep -Fq -- 'hostfakesplit:host=common.dot.dns.yandex.net:midhost=midsld:badsum:tcp_ack=-66000' || return 1
+
+    # Switch to all: replaces DoH profile idempotently (no duplicate --hostlist-domains)
+    doh_fix_apply all >/dev/null 2>&1 || return 1
+    [ "$(doh_fix_get_mode)" = "all" ] || return 1
+    local opt2 count
+    opt2=$(zapret_get_opt)
+    count=$(printf '%s\n' "${opt2}" | grep -o -- '--hostlist-domains=' | wc -l | tr -d ' ')
+    [ "${count}" -eq 1 ] || return 1
+    echo "${opt2}" | grep -Fq -- 'xbox-dns.ru' || return 1
+    combo_build_args safe safe | grep -Fq -- '--hostlist-domains=' || return 1
+
+    # Remove DoH fix: restores original profiles without DoH rule
+    doh_fix_remove >/dev/null 2>&1 || return 1
+    [ "$(doh_fix_get_mode)" = "off" ] || return 1
+    [ "$(zapret_get_opt)" = "${base_opt}" ]
+)
+check "DoH fix auto-detects UCI resolvers, updates idempotently, and removes cleanly" doh_fix_auto_and_lifecycle
+
+doh_fix_rollback_on_failure() (
+    fixture
+    uci() {
+        case "$1" in
+            show) printf "https-dns-proxy.@https-dns-proxy[0].resolver_url='https://dns.quad9.net/dns-query'\n" ;;
+            *) return 1 ;;
+        esac
+    }
+    FAIL_RESTART=1
+    ! doh_fix_apply auto >/dev/null 2>&1 || return 1
+    [ "$(doh_fix_get_mode)" = "off" ] &&
+        cmp -s "${ZAPRET2_CONFIG}" "${CASE_DIR}/original"
+)
+check "DoH fix rolls back state file and config when restart fails" doh_fix_rollback_on_failure
+
 shell_syntax() {
     find "${ROOT}" -name '*.sh' -exec sh -n {} \; > "${TMP_ROOT}/syntax-log" 2>&1
     [ ! -s "${TMP_ROOT}/syntax-log" ]

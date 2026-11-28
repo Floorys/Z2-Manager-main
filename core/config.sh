@@ -44,6 +44,9 @@ UCI_SECTION="zapret2.config"
 DEFAULT_PORTS_TCP="80,443,2053,2083,2087,2096,8443"
 DEFAULT_PORTS_UDP="443,19294-19344,50000-65535"
 
+# Built-in DoH hostnames (geo-unblocking RU resolvers + popular global DoH)
+DEFAULT_DOH_FIX_DOMAINS="dns.comss.one,xbox-dns.ru,dns.malw.link,freedns.controld.com,dns.quad9.net,dns10.quad9.net,dns.google,cloudflare-dns.com,dns.adguard-dns.com,dns.adguard.com"
+
 # Manager Runtime Directories
 # If Z2M_DIR is not exported, resolve relative to this file
 if [ -z "${Z2M_DIR:-}" ] || [ ! -d "${Z2M_DIR}/core" ]; then

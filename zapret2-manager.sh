@@ -9,7 +9,7 @@ case "${1:-}" in
     --help|-h|--status|-s|--diagnostics|-d|--check-update|-c|-cu)
         ;;
     ''|--autoselect|-a|--generate|-g|--youtube|-yt|--discord|-dc|\
-    --discord-voice|-dv|--voice|--ports|-p|--quic|-q|--restart|-r|\
+    --discord-voice|-dv|--voice|--doh-fix|--ports|-p|--quic|-q|--restart|-r|\
     --update-zapret|-uz|--update-all|-ua|--update|-u)
         if [ "$(id -u 2>/dev/null)" != "0" ]; then
             printf "Ошибка: эта операция Zapret2-Manager требует прав root!\n" >&2
@@ -398,7 +398,7 @@ main_menu() {
         printf "  %b3.%b %bКаталог готовых стратегий%b     %b(9 пресетов: General, Flowseal, VK...)%b\n" "${BOLD}" "${NC}" "${WHITE}" "${NC}" "${DGRAY}" "${NC}"
         printf "  %b4.%b %bИсправление Discord Voice%b     %b(звонки, RTC, custom.d script #50)%b\n" "${BOLD}" "${NC}" "${MAGENTA}" "${NC}" "${DGRAY}" "${NC}"
         printf "  %b5.%b %bПорты перехвата и блок QUIC%b   %b(порты TCP/UDP, блок UDP 443 для YouTube)%b\n" "${BOLD}" "${NC}" "${CYAN}" "${NC}" "${DGRAY}" "${NC}"
-        printf "  %b6.%b %bНастройка DNS и DoH%b           %b(Google, Quad9, Xbox, DNS.ru, Cloudflare)%b\n" "${BOLD}" "${NC}" "${GREEN}" "${NC}" "${DGRAY}" "${NC}"
+        printf "  %b6.%b %bНастройка DNS и DoH%b           %b(Google, Quad9, Xbox, Malw, фикс DoH)%b\n" "${BOLD}" "${NC}" "${GREEN}" "${NC}" "${DGRAY}" "${NC}"
         printf "  %b7.%b %bСписки доменов и исключений%b   %b(YouTube, Discord, Исключения)%b\n" "${BOLD}" "${NC}" "${YELLOW}" "${NC}" "${DGRAY}" "${NC}"
         printf "  %b8.%b %bДиагностика сети и блокировок%b %b(проверка DPI RST/Freeze, вердикты)%b\n" "${BOLD}" "${NC}" "${CYAN}" "${NC}" "${DGRAY}" "${NC}"
         printf "  %b9.%b %bСинхронизация файлов и блобов%b %b(копирование fake-блобов в /opt/zapret2)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}" "${DGRAY}" "${NC}"
@@ -489,6 +489,12 @@ case "$1" in
         discord_fix_apply
         exit $?
         ;;
+    --doh-fix)
+        Z2M_NONINTERACTIVE=1; export Z2M_NONINTERACTIVE
+        z2m_bootstrap
+        doh_fix_apply "${2:-auto}"
+        exit $?
+        ;;
     --ports|-p)
         z2m_bootstrap
         run_ports_menu
@@ -560,6 +566,7 @@ case "$1" in
         printf "  z2m -yt | --youtube              Тестирование стратегий только для YouTube\n"
         printf "  z2m -dc | --discord              Тестирование стратегий только для Discord\n"
         printf "  z2m -dv | --discord-voice|--voice Установка исправления Discord Voice (звонки / RTC)\n"
+        printf "  z2m --doh-fix [auto|all]          Фикс блокировки DoH (под текущий DoH или все пресеты)\n"
         printf "  z2m -p  | --ports                Настройка перехватываемых портов TCP / UDP\n"
         printf "  z2m -q  | --quic                 Переключение блокировки QUIC (ускорение YouTube)\n"
         printf "  z2m -d  | --diagnostics          Диагностика доступности сервисов и DPI\n"

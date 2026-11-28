@@ -18,6 +18,163 @@ combo_blob_args() {
     done
 }
 
+doh_fix_state_file() {
+    echo "${ZAPRET2_DIR}/.z2m-doh-fix"
+}
+
+doh_fix_get_mode() {
+    local f mode=""
+    f=$(doh_fix_state_file)
+    [ -f "${f}" ] && mode=$(tr -d '\r\n ' < "${f}" 2>/dev/null)
+    case "${mode}" in
+        auto|all) echo "${mode}" ;;
+        *) echo "off" ;;
+    esac
+}
+
+doh_fix_is_enabled() {
+    [ "$(doh_fix_get_mode)" != "off" ]
+}
+
+# Extract active DoH hostnames configured in OpenWrt https-dns-proxy UCI.
+combo_get_uci_doh_domains() {
+    command -v uci >/dev/null 2>&1 || return 0
+    uci show https-dns-proxy 2>/dev/null | LC_ALL=C awk '
+        /\.(resolver_url|url_prefix)=/ {
+            val = $0
+            sub(/^[^=]*=/, "", val)
+            gsub(/^[\x27"]|[\x27"]$/, "", val)
+            sub(/^https?:\/\//, "", val)
+            sub(/\/.*$/, "", val)
+            sub(/:.*$/, "", val)
+            if (val ~ /^[A-Za-z0-9.-]+$/ && index(val, ".") > 0 && !seen[val]++) {
+                out = (out == "" ? val : out "," val)
+            }
+        }
+        END { if (out != "") print out }
+    '
+}
+
+# Resolve comma-separated DoH domains for the selected mode ("auto" or "all").
+doh_fix_resolve_domains() {
+    local mode="${1:-$(doh_fix_get_mode)}"
+    local active
+    active=$(combo_get_uci_doh_domains)
+    case "${mode}" in
+        all)
+            if [ -n "${active}" ]; then
+                printf '%s,%s\n' "${active}" "${DEFAULT_DOH_FIX_DOMAINS}" | LC_ALL=C awk -F, '
+                    {
+                        for (i = 1; i <= NF; i++) {
+                            if ($i != "" && !seen[$i]++) {
+                                out = (out == "" ? $i : out "," $i)
+                            }
+                        }
+                    }
+                    END { print out }
+                '
+            else
+                echo "${DEFAULT_DOH_FIX_DOMAINS}"
+            fi
+            ;;
+        auto)
+            if [ -n "${active}" ]; then
+                echo "${active}"
+            else
+                echo "${DEFAULT_DOH_FIX_DOMAINS}"
+            fi
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+# Build the zapret2 TLS desync profile for DoH endpoints (port 443, SNI hostfakesplit).
+doh_fix_build_profile() {
+    local mode="${1:-$(doh_fix_get_mode)}"
+    [ "${mode}" != "off" ] || return 0
+    local domains fake_host="common.dot.dns.yandex.net"
+    domains=$(doh_fix_resolve_domains "${mode}")
+    [ -n "${domains}" ] || return 0
+    case ",${domains}," in
+        *,common.dot.dns.yandex.net,*) fake_host="gosuslugi.ru" ;;
+    esac
+    printf '%s' "--filter-tcp=443 --filter-l7=tls --hostlist-domains=${domains} --out-range=-d10 --payload=tls_client_hello --lua-desync=hostfakesplit:host=${fake_host}:midhost=midsld:badsum:tcp_ack=-66000"
+}
+
+# Idempotently insert, update, or remove the DoH fix profile in an existing NFQWS2_OPT string.
+combo_patch_doh_opt() {
+    local cur_opt="$1"
+    local doh_profile="$2"
+    Z2M_CUR_OPT="${cur_opt}" Z2M_DOH_PROFILE="${doh_profile}" LC_ALL=C awk '
+        BEGIN {
+            opt = ENVIRON["Z2M_CUR_OPT"]
+            doh = ENVIRON["Z2M_DOH_PROFILE"]
+            gsub(/^[ \t]+|[ \t]+$/, "", opt)
+            if (opt == "") {
+                if (doh != "") print "--ctrack-disable=0 --ipcache-lifetime=8400 --ipcache-hostname=1 " doh
+                exit
+            }
+
+            # Separate global options before the first --filter-* from filter profiles.
+            if (match(opt, /(^| )--filter-/)) {
+                pos = RSTART
+                if (substr(opt, pos, 1) == " ") {
+                    prefix = substr(opt, 1, pos - 1)
+                    rest = substr(opt, pos + 1)
+                } else {
+                    prefix = ""
+                    rest = opt
+                }
+            } else {
+                print opt (doh != "" ? " " doh : "")
+                exit
+            }
+
+            # Split remaining profiles on " --new " and drop any existing DoH fix profile.
+            n = 0
+            while (length(rest) > 0) {
+                idx = index(rest, " --new ")
+                if (idx > 0) {
+                    seg = substr(rest, 1, idx - 1)
+                    rest = substr(rest, idx + 7)
+                } else {
+                    seg = rest
+                    rest = ""
+                }
+                gsub(/^[ \t]+|[ \t]+$/, "", seg)
+                if (seg == "") continue
+                if (seg ~ /^--filter-tcp=443 --filter-l7=tls --hostlist-domains=/) continue
+                segs[++n] = seg
+            }
+
+            if (doh != "") {
+                ins = n + 1
+                for (i = 1; i <= n; i++) {
+                    if (segs[i] ~ /^--filter-tcp=443-65535/ || segs[i] ~ /--filter-l7=tls/) {
+                        ins = i
+                        break
+                    }
+                }
+                for (i = n; i >= ins; i--) segs[i + 1] = segs[i]
+                segs[ins] = doh
+                n++
+            }
+
+            out = prefix
+            for (i = 1; i <= n; i++) {
+                if (i == 1) {
+                    out = (out == "" ? segs[i] : out " " segs[i])
+                } else {
+                    out = out " --new " segs[i]
+                }
+            }
+            print out
+        }
+    '
+}
+
 # Build full NFQWS2_OPT argument string from components:
 # $1: discord_tls_desync
 # $2: youtube_tls_desync
@@ -56,6 +213,11 @@ combo_build_args() {
 
     # HTTP must be profiled as well as intercepted; TLS-only rules ignore port 80.
     opt="${opt} --filter-tcp=80 --filter-l7=http ${filter_ex} --payload=http_req --lua-desync=fake:tcp_md5 --lua-desync=multisplit:pos=method+2"
+
+    # Optional DoH TLS profile (runs before general/exclude TLS profiles)
+    local doh_profile
+    doh_profile=$(doh_fix_build_profile)
+    [ -z "${doh_profile}" ] || opt="${opt} --new ${doh_profile}"
 
     # Profile 1: Discord TLS
     opt="${opt} --new --filter-tcp=443-65535 --filter-l7=tls ${filter_dc} --out-range=-d10 --payload=tls_client_hello ${discord_tls}"

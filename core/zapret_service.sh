@@ -346,6 +346,11 @@ zapret_backup_config() {
             rm -r "${backup_file}"; return 1;
         }
     fi
+    if [ -f "${ZAPRET2_DIR}/.z2m-doh-fix" ]; then
+        cp -p "${ZAPRET2_DIR}/.z2m-doh-fix" "${backup_file}/doh-fix" || {
+            rm -r "${backup_file}"; return 1;
+        }
+    fi
     echo "${backup_file}"
 }
 
@@ -375,6 +380,10 @@ zapret_restore_config() {
     fi
     if [ -d "${backup_file}/discord-state" ]; then
         cp -Rp "${backup_file}/discord-state" "${ZAPRET2_DIR}/.z2m-discord" || rc=1
+    fi
+    rm -f "${ZAPRET2_DIR}/.z2m-doh-fix" || rc=1
+    if [ -f "${backup_file}/doh-fix" ]; then
+        cp -p "${backup_file}/doh-fix" "${ZAPRET2_DIR}/.z2m-doh-fix" || rc=1
     fi
     if [ "$(cat "${backup_file}/status")" = running ]; then
         zapret_start || rc=1
