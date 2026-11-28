@@ -93,6 +93,21 @@ zapret_get_latest_version() {
     echo "${tag}" | sed 's/^v//'
 }
 
+# Fetch latest Zapret2-Manager version from GitHub main branch (core/config.sh)
+z2m_get_latest_version() {
+    local repo="${Z2M_GITHUB_REPO:-Floorys/Z2-Manager}"
+    local url="https://raw.githubusercontent.com/${repo}/main/core/config.sh"
+    local ver=""
+
+    if command -v curl >/dev/null 2>&1; then
+        ver=$(curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 5 -m 8 "${url}" 2>/dev/null | sed -n 's/^Z2M_VERSION=["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -n1)
+    fi
+    if [ -z "${ver}" ] && command -v wget >/dev/null 2>&1; then
+        ver=$(wget -qO- --timeout=8 "${url}" 2>/dev/null | sed -n 's/^Z2M_VERSION=["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -n1)
+    fi
+    echo "${ver}" | sed 's/^v//'
+}
+
 # Detect system architecture, package manager, and generate candidate list
 zapret_detect_system_arch() {
     # 1. Package manager
@@ -653,9 +668,23 @@ run_check_updates_cli() {
     fi
     echo ""
 
+    local latest_z2m
+    latest_z2m=$(z2m_get_latest_version)
     printf "  %bZapret2-Manager (Floorys/Z2-Manager):%b\n" "${BOLD}" "${NC}"
     printf "    Установлена : v%s\n" "${Z2M_VERSION}"
-    printf "    Обновление  : выполните 'z2m -u' для открытия центра обновлений\n\n"
+    printf "    Актуальная  : %s\n" "${latest_z2m:-не удалось получить}"
+    if [ -n "${latest_z2m}" ]; then
+        vercmp "${Z2M_VERSION}" "${latest_z2m}"
+        local z2m_cmp=$?
+        if [ "${z2m_cmp}" -eq 2 ]; then
+            printf "    Статус      : %b%bДоступно обновление до v%s!%b (запустите: z2m -u)\n" "${GREEN}" "${BOLD}" "${latest_z2m}" "${NC}"
+        elif [ "${z2m_cmp}" -eq 0 ]; then
+            printf "    Статус      : %bУстановлена актуальная версия ✔%b\n" "${GREEN}" "${NC}"
+        else
+            printf "    Статус      : %bЛокальная версия новее GitHub%b\n" "${YELLOW}" "${NC}"
+        fi
+    fi
+    echo ""
 }
 
 # Interactive Update Center Menu
@@ -672,10 +701,11 @@ run_updates_menu() {
 
         zapret_detect_system_arch
 
-        local cur_zap latest_zap
+        local cur_zap latest_zap latest_z2m
         cur_zap=$(zapret_get_installed_version)
-        tui_info "Проверка актуальной версии Zapret2 на GitHub..."
+        tui_info "Проверка актуальных версий Zapret2 и Z2-Manager на GitHub..."
         latest_zap=$(zapret_get_latest_version)
+        latest_z2m=$(z2m_get_latest_version)
 
         tui_banner
         tui_header "Центр обновлений (Zapret2 и Z2-Manager)"
@@ -703,8 +733,25 @@ run_updates_menu() {
             fi
         fi
 
+        local z2m_status_badge=""
+        local can_update_z2m=0
+        if [ -z "${latest_z2m}" ]; then
+            z2m_status_badge="${CYAN}v${Z2M_VERSION}${NC} ${DGRAY}(проверка сети не удалась)${NC}"
+        else
+            vercmp "${Z2M_VERSION}" "${latest_z2m}"
+            local zc=$?
+            if [ "${zc}" -eq 2 ]; then
+                z2m_status_badge="${YELLOW}v${Z2M_VERSION}${NC} -> ${GREEN}${BOLD}[Доступно обновление v${latest_z2m}]${NC}"
+                can_update_z2m=1
+            elif [ "${zc}" -eq 0 ]; then
+                z2m_status_badge="${GREEN}v${Z2M_VERSION}${NC} ${GREEN}(Актуальная версия [+])${NC}"
+            else
+                z2m_status_badge="${CYAN}v${Z2M_VERSION}${NC} ${YELLOW}(Локальная новее GitHub)${NC}"
+            fi
+        fi
+
         printf "  %bZapret2         :%b %b\n" "${BOLD}" "${NC}" "${zap_status_badge}"
-        printf "  %bZapret2-Manager :%b %bv%s%b %b(Floorys/Z2-Manager)%b\n" "${BOLD}" "${NC}" "${CYAN}" "${Z2M_VERSION}" "${NC}" "${DGRAY}" "${NC}"
+        printf "  %bZapret2-Manager :%b %b\n" "${BOLD}" "${NC}" "${z2m_status_badge}"
         printf "%b  -------------------------------------------------------------------%b\n\n" "${DGRAY}" "${NC}"
 
         if [ "${can_update_zapret}" -eq 1 ]; then
@@ -714,7 +761,12 @@ run_updates_menu() {
             printf "  %b1.%b Переустановить Zapret2 v%s     %b(принудительная переустановка пакета)%b\n" \
                 "${BOLD}" "${NC}" "${latest_zap:-latest}" "${DGRAY}" "${NC}"
         fi
-        printf "  %b2.%b Обновить Zapret2-Manager        %b(самообновление менеджера с GitHub)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+        if [ "${can_update_z2m}" -eq 1 ]; then
+            printf "  %b2.%b %b%bОбновить Zapret2-Manager до v%s%b %b(самообновление с GitHub)%b\n" \
+                "${BOLD}" "${NC}" "${GREEN}" "${BOLD}" "${latest_z2m}" "${NC}" "${DGRAY}" "${NC}"
+        else
+            printf "  %b2.%b Обновить Zapret2-Manager        %b(самообновление менеджера с GitHub)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
+        fi
         printf "  %b3.%b Обновить всё                    %b(Zapret2 + Zapret2-Manager в один шаг)%b\n" "${BOLD}" "${NC}" "${DGRAY}" "${NC}"
         printf "  %b4.%b Повторить проверку обновлений\n" "${BOLD}" "${NC}"
         printf "  %b0.%b Назад в главное меню\n\n" "${BOLD}" "${NC}"

@@ -718,6 +718,15 @@ doh_fix_rollback_on_failure() (
 )
 check "DoH fix rolls back state file and config when restart fails" doh_fix_rollback_on_failure
 
+z2m_remote_version_check() (
+    fixture
+    zapret_get_installed_version() { echo "1.0.8"; }
+    zapret_get_latest_version() { echo "1.0.8"; }
+    z2m_get_latest_version() { echo "9.9.9"; }
+    run_check_updates_cli | grep -Fq "Доступно обновление до v9.9.9!"
+)
+check "run_check_updates_cli detects newer Z2-Manager version on GitHub" z2m_remote_version_check
+
 shell_syntax() {
     find "${ROOT}" -name '*.sh' -exec sh -n {} \; > "${TMP_ROOT}/syntax-log" 2>&1
     [ ! -s "${TMP_ROOT}/syntax-log" ]
